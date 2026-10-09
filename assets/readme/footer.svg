@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="92" viewBox="0 0 1100 92" role="img" aria-label="shadowhook footer">
+  <rect width="1100" height="92" fill="#090a0d"/><path d="M30 23H1070 M30 71H1070" stroke="#313039"/>
+  <path d="M30 23v48 M1070 23v48" stroke="#77717e"/>
+  <text x="48" y="53" font-family="Arial, Helvetica, sans-serif" font-weight="600" font-size="21" fill="#efebf0" letter-spacing="1">shadowhook</text>
+  <text x="1052" y="52" text-anchor="end" font-family="Consolas, monospace" font-size="14" fill="#a5a0ad" letter-spacing="1.5">research · instrument · understand</text>
+</svg>

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="225" viewBox="0 0 1160 225" role="img" aria-labelledby="title desc">
+  <title id="title">shadowhook usage lifecycle</title>
+  <desc id="desc">initialize, resolve a target, install a hook, invoke, unhook, then shutdown</desc>
+  <rect width="1160" height="225" rx="3" fill="#0a0b0e"/>
+  <rect x="1" y="1" width="1158" height="223" fill="none" stroke="#2b2931"/>
+  <text x="30" y="33" fill="#888591" font-family="Consolas, monospace" font-size="12" letter-spacing="1.6">02 / hook lifecycle</text>
+  <path d="M30 48H1130" stroke="#33313b"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <g transform="translate(30 70)"><rect width="166" height="98" rx="4" fill="#18171c" stroke="#6d6673"/><text x="16" y="24" fill="#9d96a2" font-size="12">01</text><text x="16" y="53" fill="#f0edf2" font-size="17" font-weight="600">initialize</text><text x="16" y="78" fill="#bbb4c0" font-family="Consolas, monospace" font-size="13">sh_init()</text></g>
+    <g transform="translate(217 70)"><rect width="166" height="98" rx="4" fill="#18171c" stroke="#6d6673"/><text x="16" y="24" fill="#9d96a2" font-size="12">02</text><text x="16" y="53" fill="#f0edf2" font-size="17" font-weight="600">resolve</text><text x="16" y="78" fill="#bbb4c0" font-family="Consolas, monospace" font-size="13">target address</text></g>
+    <g transform="translate(404 70)"><rect width="166" height="98" rx="4" fill="#202025" stroke="#aaa1b4"/><text x="16" y="24" fill="#b7acbe" font-size="12">03</text><text x="16" y="53" fill="#ffffff" font-size="17" font-weight="600">install</text><text x="16" y="78" fill="#d2cbd6" font-family="Consolas, monospace" font-size="13">sh_hook(...)</text></g>
+    <g transform="translate(591 70)"><rect width="166" height="98" rx="4" fill="#18171c" stroke="#6d6673"/><text x="16" y="24" fill="#9d96a2" font-size="12">04</text><text x="16" y="53" fill="#f0edf2" font-size="17" font-weight="600">invoke</text><text x="16" y="78" fill="#bbb4c0" font-family="Consolas, monospace" font-size="13">target()</text></g>
+    <g transform="translate(778 70)"><rect width="166" height="98" rx="4" fill="#18171c" stroke="#6d6673"/><text x="16" y="24" fill="#9d96a2" font-size="12">05</text><text x="16" y="53" fill="#f0edf2" font-size="17" font-weight="600">unhook</text><text x="16" y="78" fill="#bbb4c0" font-family="Consolas, monospace" font-size="13">sh_unhook()</text></g>
+    <g transform="translate(965 70)"><rect width="166" height="98" rx="4" fill="#18171c" stroke="#6d6673"/><text x="16" y="24" fill="#9d96a2" font-size="12">06</text><text x="16" y="53" fill="#f0edf2" font-size="17" font-weight="600">shutdown</text><text x="16" y="78" fill="#bbb4c0" font-family="Consolas, monospace" font-size="13">sh_shutdown()</text></g>
+  </g>
+  <g fill="none" stroke="#c5bdc8" stroke-width="1.5"><path d="M197 119h17m-6-5 6 5-6 5"/><path d="M384 119h17m-6-5 6 5-6 5"/><path d="M571 119h17m-6-5 6 5-6 5"/><path d="M758 119h17m-6-5 6 5-6 5"/><path d="M945 119h17m-6-5 6 5-6 5"/></g>
+  <text x="30" y="200" fill="#898490" font-family="Consolas, monospace" font-size="12">validate status and original trampoline before invoking · quiesce threads before teardown</text>
+</svg>

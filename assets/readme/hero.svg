@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="184" viewBox="0 0 1100 184" role="img" aria-labelledby="title desc">
+  <title id="title">shadowhook identity</title>
+  <desc id="desc">experimental windows hooking in a dark minimal typographic style</desc>
+  <rect width="1100" height="184" rx="2" fill="#090a0d"/>
+  <rect x="1" y="1" width="1098" height="182" rx="2" fill="none" stroke="#25252c"/>
+  <path d="M30 31h1040 M30 153h1040" stroke="#373640" stroke-width="1"/>
+  <path d="M42 22v18 M1058 22v18 M42 144v18 M1058 144v18" stroke="#bbb7c0" stroke-width="1.5"/>
+  <g fill="#888794" font-family="Consolas, Menlo, monospace" font-size="13" letter-spacing="2">
+    <text x="55" y="23">sh / 01</text><text x="1047" y="23" text-anchor="end">windows · c++17 · x64</text>
+    <text x="55" y="171">research build</text><text x="1047" y="171" text-anchor="end">instrumentation / redirection / analysis</text>
+  </g>
+  <g fill="#e9e7ea" font-family="Arial, Helvetica, sans-serif">
+    <text x="55" y="104" font-size="42" font-weight="600" letter-spacing="-1">see the call.</text>
+    <text x="369" y="104" font-size="42" font-weight="300" letter-spacing="-1" fill="#9b98a2">change the path.</text>
+  </g>
+  <g transform="translate(1030 81)" stroke="#e5e2e8" stroke-width="1.4" fill="none"><path d="M-23 0H23 M0-23V23"/><path d="M-12-12L12 12 M12-12L-12 12" opacity=".25"/></g>
+</svg>
