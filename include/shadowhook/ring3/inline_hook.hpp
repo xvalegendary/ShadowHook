@@ -1,6 +1,7 @@
 #pragma once
 #include "shadowhook/core/hook_base.hpp"
 #include <unordered_map>
+#include <vector>
 
 namespace shadowhook::ring3 {
 
@@ -17,8 +18,9 @@ namespace shadowhook::ring3 {
         struct inline_entry : entry {
             void* trampoline;
             size_t patch_size;
+            std::vector<uint8_t> saved_bytes_dyn;
         };
-        std::unordered_map<void*, inline_entry> inline_hooks_;
+        std::unordered_map<void*, inline_entry*> inline_hooks_;
     };
 
 } // namespace shadowhook::ring3

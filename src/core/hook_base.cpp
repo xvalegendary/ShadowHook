@@ -18,7 +18,7 @@ namespace shadowhook {
     }
 
     bool hook_base::save_bytes(void* dst, const void* src, size_t size) {
-        if (!dst || !src || !size || size > sizeof(entry::saved_bytes)) return false;
+        if (!dst || !src || !size) return false;
 
         DWORD old;
         if (!protect(const_cast<void*>(src), size, &old)) {
@@ -41,7 +41,6 @@ namespace shadowhook {
             return false;
         }
 
-        memcpy(dst, e->saved_bytes, e->patch_size);
         DWORD tmp;
         protect(dst, e->patch_size, &tmp);
         return true;

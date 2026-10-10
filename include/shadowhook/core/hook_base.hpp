@@ -32,7 +32,6 @@ namespace shadowhook {
             void* detour;
             void* original;
             size_t        patch_size;
-            uint8_t       saved_bytes[16];
             bool          active;
         };
 

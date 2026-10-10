@@ -29,21 +29,22 @@ namespace shadowhook::asm_stubs {
         uint64_t value;
     };
 
-    static_assert(sizeof(mov_rax_imm64) == 10, "mov_rax_imm64 must be 10 bytes");
-
-    struct push_rax_jmp {
-        mov_rax_imm64 mov;
-        uint8_t       push;
-        uint8_t       ret;
-    };
-
 #pragma pack(pop)
+
+    struct insn_info {
+        size_t  length;
+        bool    is_relative;
+        size_t  rel_offset;
+        size_t  rel_size;
+        bool    is_rip_relative;
+        size_t  rip_disp_offset;
+    };
 
     void write_jmp_abs(void* src, void* dst);
     void write_call_abs(void* src, void* dst);
     void write_nop(void* dst, size_t count);
 
-    size_t insn_length(uint8_t* code, size_t max);
+    insn_info decode(uint8_t* code, size_t max);
 
     extern "C" void __cdecl asm_flush_instruction_cache(void* addr, size_t size);
 
