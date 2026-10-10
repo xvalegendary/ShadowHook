@@ -1,70 +1,77 @@
-﻿#include "shadowhook/utils/memory.hpp"
+﻿#define NOMINMAX
+#include "shadowhook/utils/memory.hpp"
 #include "shadowhook/utils/logger.hpp"
+#include <algorithm>
+#include <limits>
+#include <cstdint>
+#include <cstring>
 
 namespace shadowhook::memory {
-
     bool safe_copy(void* dst, const void* src, size_t size) {
         if (!dst || !src || !size) return false;
-
-        __try {
-            memcpy(dst, src, size);
-            return true;
-        }
+        __try { std::memcpy(dst, src, size); return true; }
         __except (EXCEPTION_EXECUTE_HANDLER) {
-            SH_LOG_ERROR("safe_copy: SEH exception (dst=%p, src=%p, size=%zu)", dst, src, size);
+            SH_LOG_ERROR("safe_copy: exception (dst=%p, src=%p)", dst, src);
             return false;
         }
     }
 
     bool protect(void* addr, size_t size, DWORD new_prot, DWORD* old_prot) {
-        if (!addr || !size) return false;
-        return VirtualProtect(addr, size, new_prot, old_prot) != 0;
+        return addr && size && old_prot && VirtualProtect(addr, size, new_prot, old_prot) != 0;
     }
 
     bool is_executable(void* addr) {
-        if (!addr) return false;
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery(addr, &mbi, sizeof(mbi))) return false;
-        return (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (!addr || VirtualQuery(addr, &mbi, sizeof(mbi)) != sizeof(mbi)) return false;
+        if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+        auto p = mbi.Protect & 0xff;
+        return p == PAGE_EXECUTE || p == PAGE_EXECUTE_READ ||
+            p == PAGE_EXECUTE_READWRITE || p == PAGE_EXECUTE_WRITECOPY;
     }
 
     void* allocate_rwx(size_t size) {
-        return VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        return size ? VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE) : nullptr;
     }
 
     void* allocate_rwx_near(void* target, size_t size) {
-        SYSTEM_INFO si;
+        if (!target || !size) return nullptr;
+        SYSTEM_INFO si{};
         GetSystemInfo(&si);
+        const auto gran = static_cast<std::uintptr_t>(si.dwAllocationGranularity);
+        if (!gran || (gran & (gran - 1)) != 0) return nullptr;
+        constexpr std::uintptr_t range = 0x70000000ULL; 
+        const auto origin = reinterpret_cast<std::uintptr_t>(target);
+        const auto system_min = reinterpret_cast<std::uintptr_t>(si.lpMinimumApplicationAddress);
+        const auto system_max = reinterpret_cast<std::uintptr_t>(si.lpMaximumApplicationAddress);
+        const auto min_addr = origin > range ? std::max(system_min, origin - range) : system_min;
+        const auto max_addr = origin > system_max - std::min(range, system_max)
+            ? system_max : std::min(system_max, origin + range);
+        const auto aligned = origin & ~(gran - 1);
 
-        uintptr_t start = (uintptr_t)target;
-        uintptr_t min_addr = start > 0x70000000 ? start - 0x70000000 : (uintptr_t)si.lpMinimumApplicationAddress;
-        uintptr_t max_addr = start + 0x70000000;
+        const auto try_address = [&](std::uintptr_t p) -> void* {
+            if (p < min_addr || p > max_addr || p > system_max || size > system_max - p) return nullptr;
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<void*>(p), &mbi, sizeof(mbi)) != sizeof(mbi)) return nullptr;
+            const auto base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+            if (mbi.State != MEM_FREE || p < base || (p - base) > mbi.RegionSize) return nullptr;
+            if (size > mbi.RegionSize - (p - base)) return nullptr;
+       
+            return VirtualAlloc(reinterpret_cast<void*>(p), size,
+                MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            };
 
-        MEMORY_BASIC_INFORMATION mbi;
-
-        for (uintptr_t addr = start; addr < max_addr; ) {
-            if (VirtualQuery((void*)addr, &mbi, sizeof(mbi)) == 0) break;
-            if (mbi.State == MEM_FREE && mbi.RegionSize >= size) {
-                void* ptr = VirtualAlloc((void*)addr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-                if (ptr) return ptr;
+        for (std::uintptr_t distance = 0; distance <= range; distance += gran) {
+            if (aligned >= distance) {
+                if (void* p = try_address(aligned - distance)) return p;
             }
-            addr += mbi.RegionSize ? mbi.RegionSize : si.dwPageSize;
-        }
-
-        for (uintptr_t addr = start; addr > min_addr; ) {
-            if (VirtualQuery((void*)addr, &mbi, sizeof(mbi)) == 0) break;
-            if (mbi.State == MEM_FREE && mbi.RegionSize >= size) {
-                void* ptr = VirtualAlloc((void*)addr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-                if (ptr) return ptr;
+            if (distance && aligned <= system_max - distance) {
+                if (void* p = try_address(aligned + distance)) return p;
             }
-            addr -= mbi.RegionSize ? mbi.RegionSize : si.dwPageSize;
         }
-
-        return VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        return nullptr; 
     }
 
     void free_rwx(void* addr) {
         if (addr) VirtualFree(addr, 0, MEM_RELEASE);
     }
-
 } // namespace shadowhook::memory
