@@ -151,7 +151,7 @@ For unguarded callers at explicitly prepared x64 sites, use hook_type::hotpatch.
 ## backends
 
 | backend | behavior / scope |
-| :-- | :-- | :-- |
+| :-- | :-- |
 | `inline_hook` | patches a function entry and creates a trampoline; relocation and thread-safety caveats apply |
 | `iat_shadow` | rewrites the matching iat slot of the main executable, not every loaded module |
 | `vtable` | explicit slot/method + bounded layout; private per-instance clone or explicit shared mode; legacy API remains shared slot 0 |
