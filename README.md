@@ -16,6 +16,13 @@
 
 ---
 
+> [!IMPORTANT]
+> **Hardening API update:** inline patching requires an explicitly configured cooperative
+> execution domain covering every full target/original call. Unwind-sensitive prologues
+> are rejected. Raw originals are retained for process lifetime; leases reclaim storage
+> after the last owner releases it. See [migration and contracts](docs/hardening.md).
+> The API monitor now uses atomic IAT slot exchange.
+
 ## overview
 
 **shadowhook** is an experimental windows x64 hooking library built in c++17. it exposes a small public api backed by a registry of interchangeable hook implementations. the repository is intended for learning, instrumentation, debugging, and authorized security research.

@@ -8,6 +8,7 @@ namespace shadowhook::asm_stubs {
             std::size_t displacement_offset{};
             bool rip_relative{};
             std::uint8_t reg{};
+            std::uint8_t mod{};
         };
 
         bool is_legacy_prefix(std::uint8_t b) noexcept {
@@ -31,6 +32,7 @@ namespace shadowhook::asm_stubs {
             if (pos >= limit || pos >= 15) return out;
             const auto m = bytes[pos++];
             const auto mod = static_cast<std::uint8_t>(m >> 6);
+            out.mod = mod;
             const auto rm = static_cast<std::uint8_t>(m & 7);
             out.reg = static_cast<std::uint8_t>((m >> 3) & 7);
             if (mod != 3) {
@@ -71,12 +73,13 @@ namespace shadowhook::asm_stubs {
         std::size_t pos = 0;
         bool operand16 = false, address_override = false, rex_w = false;
         bool has_lock = false, has_rep = false;
+        std::uint8_t rep{};
         while (pos < limit && is_legacy_prefix(code[pos])) {
             const auto p = code[pos++];
             if (p == 0x66) operand16 = true;
             if (p == 0x67) address_override = true;
             if (p == 0xF0) has_lock = true;
-            if (p == 0xF2 || p == 0xF3) has_rep = true;
+            if (p == 0xF2 || p == 0xF3) { has_rep = true; rep = p; }
         }
       
         if (has_lock) return fail;
@@ -85,6 +88,34 @@ namespace shadowhook::asm_stubs {
         }
         if (pos >= limit) return fail;
         const auto op = code[pos++];
+
+        if (op == 0xC4 || op == 0xC5) {
+            if (pos != 1 || pos >= limit) return fail;
+            std::uint8_t vex{};
+            if (op == 0xC4) {
+                const auto map = code[pos++];
+                if ((map & 0x1f) != 1 || pos >= limit) return fail;
+                vex = code[pos++];
+                if (vex & 0x80) return fail;
+            } else vex = code[pos++];
+            if (pos >= limit || (vex & 0x78) != 0x78) return fail;
+            const auto vector_op = code[pos++];
+            const auto pp = vex & 3;
+            insn_info vector_result{};
+            if (vector_op == 0x77) {
+                if (pp != 0) return fail;
+                vector_result.length = pos;
+                return vector_result;
+            }
+            if (!(((vector_op == 0x10 || vector_op == 0x11 || vector_op == 0x28 || vector_op == 0x29) && pp <= 1) ||
+                  ((vector_op == 0x6F || vector_op == 0x7F) && (pp == 1 || pp == 2)))) return fail;
+            const auto r = read_modrm(code, pos, limit, false);
+            if (!r.ok) return fail;
+            vector_result.length = pos;
+            vector_result.is_rip_relative = r.rip_relative;
+            vector_result.rip_disp_offset = r.displacement_offset;
+            return vector_result;
+        }
         std::uint8_t op2 = 0;
         bool two_byte = false, modrm = false, group_f6 = false, group_f7 = false;
         std::size_t imm_size = 0;
@@ -98,7 +129,7 @@ namespace shadowhook::asm_stubs {
             op2 = code[pos++];
             if (op2 == 0x38 || op2 == 0x3A) return fail;
             // CET ENDBR64: F3 0F 1E FA
-            if (op2 == 0x1E && has_rep && pos < limit && code[pos] == 0xFA) {
+            if (op2 == 0x1E && rep == 0xF3 && !operand16 && pos < limit && code[pos] == 0xFA) {
                 ++pos;
                 result.length = pos;
                 return result;
@@ -153,7 +184,7 @@ namespace shadowhook::asm_stubs {
             imm_size = rex_w ? 8 : (operand16 ? 2 : 4);
         }
         else if (op == 0xA9) {
-            imm_size = operand16 ? 2 : 4;
+            imm_size = operand16 && !rex_w ? 2 : 4;
         }
         else if (op == 0x88 || op == 0x89 || op == 0x8A || op == 0x8B ||
             op == 0x8D || op == 0x8C || op == 0x8E || op == 0x8F ||
@@ -167,7 +198,7 @@ namespace shadowhook::asm_stubs {
             (op >= 0xD0 && op <= 0xD3)) {
             modrm = true;
             if (op == 0xC6 || op == 0x80 || op == 0x83 || op == 0x6B || op == 0xC0 || op == 0xC1) imm_size = 1;
-            if (op == 0xC7 || op == 0x81 || op == 0x69) imm_size = operand16 ? 2 : 4;
+            if (op == 0xC7 || op == 0x81 || op == 0x69) imm_size = operand16 && !rex_w ? 2 : 4;
         }
         else if (op == 0xF6 || op == 0xF7) {
             modrm = true;
@@ -179,14 +210,33 @@ namespace shadowhook::asm_stubs {
         }
         if (has_rep && !((op == 0x90) || (two_byte && (op2 == 0x10 || op2 == 0x11 || op2 == 0x6F || op2 == 0x7F)))) return fail;
         if (modrm) {
+            if (two_byte && (op2 == 0x6F || op2 == 0x7F) && rep == 0xF2) return fail;
+            if (has_rep && operand16) return fail; 
             const auto r = read_modrm(code, pos, limit, address_override);
             if (!r.ok) return fail;
+            if (!two_byte) {
+                if ((op == 0xC6 || op == 0xC7 || op == 0x8F) && r.reg != 0) return fail;
+                if (op == 0xFE && r.reg > 1) return fail;
+                if (op == 0xFF && (r.reg == 3 || r.reg == 5 || r.reg == 7)) return fail;
+                if (op == 0x8D && r.mod == 3) return fail;
+                if ((op == 0x8C || op == 0x8E) && (r.reg > 5 || (op == 0x8E && r.reg == 1))) return fail;
+                if ((op == 0xC0 || op == 0xC1 || (op >= 0xD0 && op <= 0xD3)) && r.reg == 6) return fail;
+            } else {
+                if (op2 == 0x1F && r.reg != 0) return fail;
+                if (op2 == 0xBA && r.reg < 4) return fail;
+                if (op2 >= 0x90 && op2 <= 0x9F && r.reg != 0) return fail;
+                if (op2 == 0x71 || op2 == 0x72 || op2 == 0x73) {
+                    if (r.mod != 3 || (r.reg != 2 && r.reg != 4 && r.reg != 6 &&
+                        !(op2 == 0x73 && operand16 && (r.reg == 3 || r.reg == 7))) ||
+                        (op2 == 0x73 && r.reg == 4)) return fail;
+                }
+            }
             if (r.rip_relative) {
                 result.is_rip_relative = true;
                 result.rip_disp_offset = r.displacement_offset;
             }
             if ((group_f6 || group_f7) && r.reg == 0)
-                imm_size = group_f6 ? 1 : (operand16 ? 2 : 4);
+                imm_size = group_f6 ? 1 : (operand16 && !rex_w ? 2 : 4);
             if ((group_f6 || group_f7) && r.reg == 1) return fail;
         }
         if (!consume(pos, imm_size, limit)) return fail;

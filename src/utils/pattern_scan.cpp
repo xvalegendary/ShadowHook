@@ -1,5 +1,6 @@
 ﻿#include "shadowhook/utils/pattern_scan.hpp"
 #include "shadowhook/utils/logger.hpp"
+#include "shadowhook/utils/memory.hpp"
 #include <algorithm>
 #include <cstring>
 #include <psapi.h>
@@ -26,23 +27,69 @@ namespace shadowhook {
         return {}; 
     }
 
-    pattern_result pattern_scanner::find(uintptr_t base, size_t size,
-        const char* pattern, const char* mask) {
-        if (!base || !pattern || !mask) return {};
-        const auto len = std::strlen(mask);
-        if (!len || len > size) return {};
-        const auto* bytes = reinterpret_cast<const std::uint8_t*>(base);
-        for (size_t i = 0; i <= size - len; ++i) {
-            bool matches = true;
-            for (size_t j = 0; j != len; ++j) {
-                if (mask[j] == 'x' && bytes[i + j] != static_cast<std::uint8_t>(pattern[j])) {
-                    matches = false;
-                    break;
-                }
-            }
-            if (matches) return { base + i, len, true };
+    namespace {
+        bool matches_at(const std::uint8_t* bytes, const char* pattern,
+                        const char* mask, std::size_t len) {
+            __try {
+                for (std::size_t j = 0; j < len; ++j)
+                    if (mask[j] == 'x' && bytes[j] != static_cast<std::uint8_t>(pattern[j]))
+                        return false;
+                return true;
+            } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
         }
-        return {};
+        std::vector<pattern_result> scan(std::uintptr_t base, std::size_t size,
+                                        const char* pattern, const char* mask, bool first) {
+            std::vector<pattern_result> out;
+            if (!base || !size || size > UINTPTR_MAX - base || !pattern || !mask) return out;
+            const auto len = std::strlen(mask);
+            if (!len || len > size) return out;
+            for (std::size_t j = 0; j < len; ++j)
+                if (mask[j] != 'x' && mask[j] != '?') return out;
+            const auto end = base + size;
+            auto cursor = base;
+            std::uintptr_t readable_begin{};
+
+            auto scan_run = [&](std::uintptr_t stop) {
+                if (!readable_begin || stop - readable_begin < len) return false;
+                for (auto p = readable_begin; p <= stop - len; ++p) {
+                    if (matches_at(reinterpret_cast<const std::uint8_t*>(p), pattern, mask, len)) {
+                        out.push_back({p, len, true});
+                        if (first) return true;
+                    }
+                }
+                return false;
+            };
+            while (cursor < end) {
+                MEMORY_BASIC_INFORMATION m{};
+                if (VirtualQuery(reinterpret_cast<void*>(cursor), &m, sizeof(m)) != sizeof(m)) break;
+                const auto region = reinterpret_cast<std::uintptr_t>(m.BaseAddress);
+                if (cursor < region || cursor - region >= m.RegionSize) break;
+                const auto stop = cursor + std::min<std::size_t>(end - cursor, m.RegionSize - (cursor - region));
+                const bool readable = memory::readable_range(reinterpret_cast<void*>(cursor), 1);
+                if (readable) { if (!readable_begin) readable_begin = cursor; }
+                else {
+                    if (scan_run(cursor)) return out;
+                    readable_begin = 0;
+                }
+                cursor = stop;
+            }
+            scan_run(cursor);
+            return out;
+        }
+        std::uintptr_t relative_target(std::uintptr_t site, std::size_t size, std::int32_t disp) {
+            if (size > UINTPTR_MAX - site) return 0;
+            const auto next = site + size;
+            if (disp < 0) {
+                const auto distance = static_cast<std::uint64_t>(-static_cast<std::int64_t>(disp));
+                return distance <= next ? next - distance : 0;
+            }
+            return static_cast<std::uint32_t>(disp) <= UINTPTR_MAX - next ? next + disp : 0;
+        }
+    }
+    pattern_result pattern_scanner::find(uintptr_t base, size_t size,
+                                        const char* pattern, const char* mask) {
+        const auto out = scan(base, size, pattern, mask, true);
+        return out.empty() ? pattern_result{} : out.front();
     }
 
     pattern_result pattern_scanner::find_in_module(const char* module,
@@ -56,50 +103,33 @@ namespace shadowhook {
         return {};
     }
     std::vector<pattern_result> pattern_scanner::find_all(uintptr_t base, size_t size,
-        const char* pattern, const char* mask) {
-        std::vector<pattern_result> out;
-        if (!base || !pattern || !mask) return out;
-        const auto len = std::strlen(mask);
-        if (!len || len > size) return out;
-        const auto* bytes = reinterpret_cast<const std::uint8_t*>(base);
-        for (size_t i = 0; i <= size - len; ++i) {
-            bool matches = true;
-            for (size_t j = 0; j != len; ++j) {
-                if (mask[j] == 'x' && bytes[i + j] != static_cast<std::uint8_t>(pattern[j])) {
-                    matches = false;
-                    break;
-                }
-            }
-            if (matches) out.push_back({ base + i, len, true });
-        }
-        return out;
+                                                         const char* pattern, const char* mask) {
+        return scan(base, size, pattern, mask, false);
     }
     uintptr_t pattern_scanner::resolve_call(uintptr_t site) {
-        if (!site) return 0;
-        const auto* p = reinterpret_cast<const std::uint8_t*>(site);
-        if (p[0] != 0xE8) return 0;
+        std::uint8_t bytes[5]{};
+        if (!memory::readable_range(reinterpret_cast<void*>(site), sizeof(bytes)) ||
+            !memory::safe_copy(bytes, reinterpret_cast<void*>(site), sizeof(bytes)) || bytes[0] != 0xE8) return 0;
         std::int32_t disp{};
-        std::memcpy(&disp, p + 1, sizeof(disp));
-        return static_cast<uintptr_t>(static_cast<std::intptr_t>(site + 5) + disp);
+        std::memcpy(&disp, bytes + 1, sizeof(disp));
+        return relative_target(site, sizeof(bytes), disp);
     }
     uintptr_t pattern_scanner::resolve_lea(uintptr_t site) {
-        if (!site) return 0;
-        const auto* p = reinterpret_cast<const std::uint8_t*>(site);
-        if (p[0] != 0x48 || p[1] != 0x8D || p[2] != 0x05) return 0;
+        std::uint8_t bytes[7]{};
+        if (!memory::readable_range(reinterpret_cast<void*>(site), sizeof(bytes)) ||
+            !memory::safe_copy(bytes, reinterpret_cast<void*>(site), sizeof(bytes)) ||
+            bytes[0] != 0x48 || bytes[1] != 0x8D || bytes[2] != 0x05) return 0;
         std::int32_t disp{};
-        std::memcpy(&disp, p + 3, sizeof(disp));
-        return static_cast<uintptr_t>(static_cast<std::intptr_t>(site + 7) + disp);
+        std::memcpy(&disp, bytes + 3, sizeof(disp));
+        return relative_target(site, sizeof(bytes), disp);
     }
-    uintptr_t pattern_scanner::find_ref(uintptr_t base, size_t size,
-        uintptr_t target, size_t ref_size) {
-        if (!base || !ref_size || ref_size > sizeof(uintptr_t) || ref_size > size) return 0;
-        const auto* data = reinterpret_cast<const std::uint8_t*>(base);
-        for (size_t i = 0; i <= size - ref_size; ++i) {
-            uintptr_t value{};
-            std::memcpy(&value, data + i, ref_size);
-            if (value == target) return base + i;
-        }
-        return 0;
+    uintptr_t pattern_scanner::find_ref(uintptr_t base, size_t size, uintptr_t target, size_t ref_size) {
+        if (!ref_size || ref_size > sizeof(target) || ref_size > size) return 0;
+        if (ref_size < sizeof(target) && target >> (ref_size * 8)) return 0;
+        char mask[sizeof(target) + 1]{};
+        std::memset(mask, 'x', ref_size);
+        const auto result = find(base, size, reinterpret_cast<const char*>(&target), mask);
+        return result.found ? result.address : 0;
     }
     void offset_resolver::add_pattern(const char* name, const char* pattern,
         const char* mask, int32_t offset) {

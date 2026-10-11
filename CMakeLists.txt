@@ -1,73 +1,56 @@
-﻿cmake_minimum_required(VERSION 3.16)
-
+cmake_minimum_required(VERSION 3.16)
 project(ShadowHook VERSION 1.0.0 LANGUAGES C CXX)
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_C_STANDARD 11)
-
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
+if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "ShadowHook currently requires MSVC Windows x64")
 endif()
-
-if(MSVC)
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/W4>)
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/permissive->)
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/WX->)
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/GS->)
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Gs9999999>)
-    add_compile_definitions(_CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
-endif()
-
-include_directories(include)
-
+enable_language(ASM_MASM)
+option(SHADOWHOOK_BUILD_EXAMPLES "Build the API monitor example" ON)
+option(SHADOWHOOK_BUILD_KERNEL_STUBS "Assemble separate kernel-only stubs (never link into ring3)" OFF)
 set(SHADOWHOOK_SOURCES
-    src/core/hook_base.cpp
-    src/core/hook_manager.cpp
-    src/core/hook_context.cpp
-    src/ring0/ept_hook.cpp
-    src/ring0/page_shadow.cpp
-    src/ring0/iat_shadow.cpp
-    src/ring0/ssdt_shadow.cpp
-    src/ring3/vtable_hook.cpp
-    src/ring3/exception_hook.cpp
-    src/ring3/dll_hollow.cpp
-    src/ring3/inline_hook.cpp
-    src/utils/pattern_scan.cpp
-    src/utils/logger.cpp
-    src/utils/memory.cpp
-    src/utils/asm_stubs.cpp
-    src/shadowhook.cpp
-)
-
-if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8)
-    enable_language(ASM_MASM)
-    
-    set(CMAKE_ASM_MASM_FLAGS_INIT "")
-    set(CMAKE_ASM_MASM_FLAGS_DEBUG "")
-    set(CMAKE_ASM_MASM_FLAGS_RELEASE "")
-    
-    list(APPEND SHADOWHOOK_SOURCES src/utils/asm_stubs.asm)
-    
-    set_source_files_properties(src/utils/asm_stubs.asm PROPERTIES
-        COMPILE_FLAGS "/nologo"
-    )
-endif()
-
+    src/core/hook_base.cpp src/core/hook_manager.cpp src/core/hook_context.cpp
+    src/ring0/ept_hook.cpp src/ring0/page_shadow.cpp src/ring0/iat_shadow.cpp src/ring0/ssdt_shadow.cpp
+    src/ring3/vtable_hook.cpp src/ring3/exception_hook.cpp src/ring3/dll_hollow.cpp src/ring3/inline_hook.cpp
+    src/utils/pattern_scan.cpp src/utils/logger.cpp src/utils/memory.cpp
+    src/utils/asm_stubs.cpp src/utils/asm_stubs.asm src/utils/thread_quiescence.cpp src/shadowhook.cpp)
 add_library(shadowhook STATIC ${SHADOWHOOK_SOURCES})
+target_compile_features(shadowhook PUBLIC cxx_std_17)
+target_compile_options(shadowhook PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4>
+                                          $<$<COMPILE_LANGUAGE:CXX>:/permissive->)
+target_compile_definitions(shadowhook PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN
+                           PRIVATE _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
 target_include_directories(shadowhook PUBLIC include)
-
-if(MSVC)
-    target_link_libraries(shadowhook PUBLIC psapi)
+target_link_libraries(shadowhook PUBLIC psapi)
+if(SHADOWHOOK_BUILD_EXAMPLES)
+    add_executable(api_monitor examples/api_monitor.cpp)
+    target_link_libraries(api_monitor PRIVATE shadowhook user32)
 endif()
-
-add_executable(api_monitor examples/api_monitor.cpp)
-target_link_libraries(api_monitor PRIVATE shadowhook)
-
-
-install(TARGETS shadowhook
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin
-)
-install(DIRECTORY include/ DESTINATION include/shadowhook)
+if(SHADOWHOOK_BUILD_KERNEL_STUBS)
+    add_library(shadowhook_kernel_stubs OBJECT src/utils/asm_kernel.asm)
+endif()
+include(CTest)
+if(BUILD_TESTING)
+    if(SHADOWHOOK_BUILD_EXAMPLES)
+        add_test(NAME api_monitor_iat COMMAND api_monitor --self-test)
+        set_tests_properties(api_monitor_iat PROPERTIES TIMEOUT 40 LABELS "windows-gui-integration")
+    endif()
+    foreach(test decoder inline memory_iat asm registry_logger logger)
+        add_executable(${test}_tests tests/${test}_tests.cpp)
+        target_link_libraries(${test}_tests PRIVATE shadowhook)
+        target_compile_options(${test}_tests PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4>
+                                                    $<$<COMPILE_LANGUAGE:CXX>:/permissive->)
+        add_test(NAME ${test} COMMAND ${test}_tests)
+        set_tests_properties(${test} PROPERTIES TIMEOUT 60)
+    endforeach()
+    target_link_libraries(logger_tests PRIVATE user32)
+    target_sources(decoder_tests PRIVATE tests/decoder_corpus.asm)
+    add_executable(regression_probe tests/regression_probe.cpp)
+    target_link_libraries(regression_probe PRIVATE shadowhook)
+    add_test(NAME regression_probe COMMAND regression_probe)
+    add_executable(lifetime_probe tests/lifetime_probe.cpp)
+    target_compile_definitions(lifetime_probe PRIVATE SHADOWHOOK_HARDENED)
+    target_link_libraries(lifetime_probe PRIVATE shadowhook)
+    add_test(NAME lifetime_probe COMMAND lifetime_probe)
+    set_tests_properties(regression_probe lifetime_probe PROPERTIES TIMEOUT 60)
+endif()
+install(TARGETS shadowhook ARCHIVE DESTINATION lib)
+install(DIRECTORY include/ DESTINATION include)

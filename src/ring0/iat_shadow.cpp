@@ -1,194 +1,237 @@
-﻿#define NOMINMAX
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "shadowhook/ring0/iat_shadow.hpp"
 #include "shadowhook/utils/logger.hpp"
 #include <algorithm>
-#include <cstddef>
-#include <cstdint>
 #include <cstring>
-#include <vector>
+#include <string>
 
 namespace shadowhook::ring0 {
-    namespace {
-        struct image_view {
-            std::uint8_t* base{};
-            std::size_t image_size{};
-            IMAGE_DATA_DIRECTORY imports{};
-            std::uint8_t* rva(std::size_t offset, std::size_t count) const {
-                if (!base || offset > image_size || count > image_size - offset) return nullptr;
-                return base + offset;
-            }
-        };
-
-        bool inspect_image(std::uint8_t* base, image_view& img) {
-            if (!base) return false;
-            const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-            if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 || dos->e_lfanew > 0x100000)
-                return false;
-            const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-            if (nt->Signature != IMAGE_NT_SIGNATURE ||
-                nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
-                nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT)
-                return false;
-            img.base = base;
-            img.image_size = nt->OptionalHeader.SizeOfImage;
-            if (img.image_size < sizeof(IMAGE_DOS_HEADER) ||
-                static_cast<std::size_t>(dos->e_lfanew) > img.image_size ||
-                sizeof(*nt) > img.image_size - static_cast<std::size_t>(dos->e_lfanew)) return false;
-            img.imports = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-            return img.imports.Size != 0 && img.rva(img.imports.VirtualAddress, img.imports.Size);
+namespace {
+struct image_view {
+    std::uintptr_t base{};
+    std::size_t size{};
+    IMAGE_DATA_DIRECTORY imports{};
+    bool bounds(std::size_t offset, std::size_t count) const {
+        return offset <= size && count <= size - offset && count <= UINTPTR_MAX - (base + offset);
+    }
+    template<class T> bool read(std::size_t offset, T& value) const {
+        return bounds(offset, sizeof(T)) &&
+            memory::readable_range(reinterpret_cast<void*>(base + offset), sizeof(T)) &&
+            memory::safe_copy(&value, reinterpret_cast<void*>(base + offset), sizeof(T));
+    }
+    bool text(std::size_t offset, std::string& value) const {
+        value.clear();
+        for (std::size_t i = 0; i < 4096; ++i) {
+            char c{};
+            if (offset > size || i > size - offset || !read(offset + i, c)) return false;
+            if (!c) return true;
+            value.push_back(c);
         }
-
-        bool get_main_image(image_view& img) {
-            return inspect_image(reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr)), img);
-        }
-
-        void** find_resolved_iat_slot(void* target) {
-            image_view img{};
-            if (!get_main_image(img)) return nullptr;
-            const auto* descriptors = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(
-                img.rva(img.imports.VirtualAddress, img.imports.Size));
-            const auto count = img.imports.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
-            for (std::size_t n = 0; n < count; ++n) {
-                const auto& d = descriptors[n];
-                if (!d.Name && !d.FirstThunk) break;
-                if (d.FirstThunk == 0) continue;
-                const std::size_t offset = d.FirstThunk;
-                if (!img.rva(offset, sizeof(IMAGE_THUNK_DATA64))) continue;
-                const auto max_thunks = (img.image_size - offset) / sizeof(IMAGE_THUNK_DATA64);
-                for (std::size_t i = 0; i < max_thunks; ++i) {
-                    auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(
-                        img.rva(offset + i * sizeof(IMAGE_THUNK_DATA64), sizeof(IMAGE_THUNK_DATA64)));
-                    if (thunk->u1.Function == 0) break;
-                    if (reinterpret_cast<void*>(static_cast<std::uintptr_t>(thunk->u1.Function)) == target)
-                        return reinterpret_cast<void**>(&thunk->u1.Function);
+        return false;
+    }
+};
+bool inspect_image(void* module, image_view& image) {
+    const auto base = reinterpret_cast<std::uintptr_t>(module);
+    MEMORY_BASIC_INFORMATION m{};
+    if (!base || VirtualQuery(module, &m, sizeof(m)) != sizeof(m) || m.AllocationBase != module) return false;
+    std::size_t allocation{};
+    auto cursor = base;
+    do {
+        const auto region = reinterpret_cast<std::uintptr_t>(m.BaseAddress);
+        if (region != cursor || !m.RegionSize || m.RegionSize > UINTPTR_MAX - cursor) return false;
+        allocation += m.RegionSize;
+        cursor += m.RegionSize;
+        if (VirtualQuery(reinterpret_cast<void*>(cursor), &m, sizeof(m)) != sizeof(m)) break;
+    } while (m.AllocationBase == module);
+    image = {base, allocation, {}};
+    IMAGE_DOS_HEADER dos{};
+    if (!image.read(0, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew < 0) return false;
+    const auto nt_offset = static_cast<std::size_t>(dos.e_lfanew);
+    struct nt_prefix { DWORD signature; IMAGE_FILE_HEADER file; };
+    static_assert(sizeof(nt_prefix) == 24);
+    nt_prefix prefix{};
+    if (!image.read(nt_offset, prefix) || prefix.signature != IMAGE_NT_SIGNATURE ||
+        prefix.file.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+        prefix.file.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER64) ||
+        !image.bounds(nt_offset, sizeof(prefix) + prefix.file.SizeOfOptionalHeader)) return false;
+    IMAGE_OPTIONAL_HEADER64 optional{};
+    if (!image.read(nt_offset + sizeof(prefix), optional) ||
+        optional.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        optional.SizeOfImage > allocation || optional.SizeOfImage < sizeof(IMAGE_DOS_HEADER) ||
+        optional.SizeOfHeaders > optional.SizeOfImage ||
+        optional.NumberOfRvaAndSizes > IMAGE_NUMBEROF_DIRECTORY_ENTRIES ||
+        optional.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT) return false;
+    image.size = optional.SizeOfImage;
+    if (!image.bounds(nt_offset, sizeof(prefix) + prefix.file.SizeOfOptionalHeader)) return false;
+    image.imports = optional.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    return image.imports.VirtualAddress && image.imports.Size >= sizeof(IMAGE_IMPORT_DESCRIPTOR) &&
+        image.bounds(image.imports.VirtualAddress, image.imports.Size) &&
+        memory::readable_range(reinterpret_cast<void*>(base + image.imports.VirtualAddress), image.imports.Size);
+}
+std::vector<void**> lookup(void* module, void* target, const char* dll_name = nullptr,
+                           const char* function = nullptr) {
+    image_view image{};
+    if (!inspect_image(module, image)) return {};
+    std::vector<void**> slots;
+    const auto count = image.imports.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
+    bool descriptors_terminated{};
+    for (std::size_t n = 0; n < count; ++n) {
+        IMAGE_IMPORT_DESCRIPTOR d{};
+        if (!image.read(image.imports.VirtualAddress + n * sizeof(d), d)) return {};
+        if (!d.Name && !d.FirstThunk && !d.OriginalFirstThunk) { descriptors_terminated = true; break; }
+        if (!d.Name || !d.FirstThunk) return {};
+        std::string dll;
+        if (!image.text(d.Name, dll)) return {};
+        const bool selected_dll = !dll_name || _stricmp(dll.c_str(), dll_name) == 0;
+        if (d.FirstThunk % alignof(void*) || !image.bounds(d.FirstThunk, sizeof(IMAGE_THUNK_DATA64))) return {};
+        const auto max = (image.size - d.FirstThunk) / sizeof(IMAGE_THUNK_DATA64);
+        bool terminated{};
+        for (std::size_t i = 0; i < max; ++i) {
+            IMAGE_THUNK_DATA64 ft{};
+            const auto ft_offset = d.FirstThunk + i * sizeof(ft);
+            if (!image.read(ft_offset, ft)) return {};
+            if (!ft.u1.Function) { terminated = true; break; }
+            bool matched = target && ft.u1.Function == reinterpret_cast<std::uintptr_t>(target);
+            if (function && selected_dll) {
+                if (!d.OriginalFirstThunk || !image.bounds(d.OriginalFirstThunk, sizeof(ft)) ||
+                    i > (image.size - d.OriginalFirstThunk) / sizeof(ft)) return {};
+                IMAGE_THUNK_DATA64 oft{};
+                if (!image.read(d.OriginalFirstThunk + i * sizeof(oft), oft)) return {};
+                if (!IMAGE_SNAP_BY_ORDINAL64(oft.u1.Ordinal) && oft.u1.AddressOfData) {
+                    if (!image.bounds(oft.u1.AddressOfData, sizeof(WORD) + 1)) return {};
+                    std::string name;
+                    if (!image.text(oft.u1.AddressOfData + sizeof(WORD), name)) return {};
+                    matched = name == function;
                 }
             }
-            return nullptr;
-        }
-    } // namespace
-
-    void** iat_shadow::find_iat_entry_addr(void* module_base, const char* import_module, const char* func_name) {
-        if (!module_base || !import_module || !func_name) return nullptr;
-        image_view img{};
-        if (!inspect_image(static_cast<std::uint8_t*>(module_base), img)) return nullptr;
-        const auto* descriptors = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(
-            img.rva(img.imports.VirtualAddress, img.imports.Size));
-        const auto count = img.imports.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
-        for (std::size_t i = 0; i < count; ++i) {
-            const auto& desc = descriptors[i];
-            if (!desc.Name && !desc.FirstThunk) break;
-            const auto* dll = img.rva(desc.Name, 1);
-            if (!dll || !std::memchr(dll, 0, img.image_size - desc.Name) ||
-                _stricmp(reinterpret_cast<const char*>(dll), import_module) != 0) continue;
-            if (!desc.OriginalFirstThunk || !desc.FirstThunk) continue;
-            if (!img.rva(desc.OriginalFirstThunk, sizeof(IMAGE_THUNK_DATA64)) ||
-                !img.rva(desc.FirstThunk, sizeof(IMAGE_THUNK_DATA64))) continue;
-            const auto count_oft = (img.image_size - desc.OriginalFirstThunk) / sizeof(IMAGE_THUNK_DATA64);
-            const auto count_ft = (img.image_size - desc.FirstThunk) / sizeof(IMAGE_THUNK_DATA64);
-            for (std::size_t j = 0; j < std::min(count_oft, count_ft); ++j) {
-                const auto* oft = reinterpret_cast<const IMAGE_THUNK_DATA64*>(
-                    img.rva(desc.OriginalFirstThunk + j * sizeof(IMAGE_THUNK_DATA64), sizeof(IMAGE_THUNK_DATA64)));
-                auto* ft = reinterpret_cast<IMAGE_THUNK_DATA64*>(
-                    img.rva(desc.FirstThunk + j * sizeof(IMAGE_THUNK_DATA64), sizeof(IMAGE_THUNK_DATA64)));
-                if (!oft->u1.AddressOfData) break;
-                if (IMAGE_SNAP_BY_ORDINAL64(oft->u1.Ordinal)) continue;
-                const auto rva = static_cast<std::size_t>(oft->u1.AddressOfData);
-                const auto* ibn = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(img.rva(rva, 3));
-                if (!ibn) continue;
-                const auto remaining = img.image_size - rva - offsetof(IMAGE_IMPORT_BY_NAME, Name);
-                if (!std::memchr(ibn->Name, 0, remaining)) continue;
-                if (std::strcmp(ibn->Name, func_name) == 0)
-                    return reinterpret_cast<void**>(&ft->u1.Function);
+            if (matched && selected_dll) {
+                auto slot = reinterpret_cast<void**>(image.base + ft_offset);
+                if (std::find(slots.begin(), slots.end(), slot) == slots.end()) slots.push_back(slot);
             }
         }
-        return nullptr;
+        if (!terminated) return {};
     }
+    return descriptors_terminated ? slots : std::vector<void**>{};
+}
+} // namespace
 
-    void* iat_shadow::resolve_import(const char* module, const char* func_name) {
-        if (!module || !func_name) return nullptr;
-        const auto h = GetModuleHandleA(module); 
-        return h ? reinterpret_cast<void*>(GetProcAddress(h, func_name)) : nullptr;
+std::vector<void**> iat_shadow::find_iat_slots(void* module, void* target) {
+    return target ? lookup(module, target) : std::vector<void**>{};
+}
+void** iat_shadow::find_iat_entry_addr(void* module, const char* dll, const char* function) {
+    if (!module || !dll || !function) return nullptr;
+    const auto slots = lookup(module, nullptr, dll, function);
+    return slots.empty() ? nullptr : slots.front();
+}
+void* iat_shadow::resolve_import(const char* module, const char* function) {
+    if (!module || !function) return nullptr;
+    const auto handle = GetModuleHandleA(module);
+    return handle ? reinterpret_cast<void*>(GetProcAddress(handle, function)) : nullptr;
+}
+iat_shadow::~iat_shadow() {
+    try { if (uninstall_all() == hook_status::success) return; } catch (...) {}
+    (void)records_.release();
+    try { SH_LOG_ERROR("[iat_shadow] failed shutdown: recovery records quarantined"); } catch (...) {}
+}
+hook_status iat_shadow::install(void* target, void* detour, void** original) {
+    return install_module(GetModuleHandleW(nullptr), target, detour, original, true);
+}
+hook_status iat_shadow::install_module(void* module, void* target, void* detour,
+                                      void** original, bool all) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    try {
+        auto slots = find_iat_slots(module, target);
+        if (!all && slots.size() > 1) slots.resize(1);
+        return install_selected(target, detour, original, slots);
+    } catch (const std::bad_alloc&) { return hook_status::alloc_failed; }
+}
+hook_status iat_shadow::install_slot(void* module, void** slot, void* target,
+                                    void* detour, void** original) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    try {
+        const auto slots = find_iat_slots(module, target);
+        if (std::find(slots.begin(), slots.end(), slot) == slots.end()) return hook_status::invalid_address;
+        return install_selected(target, detour, original, {slot});
+    } catch (const std::bad_alloc&) { return hook_status::alloc_failed; }
+}
+hook_status iat_shadow::install_selected(void* target, void* detour, void** original,
+                                        const std::vector<void**>& slots) {
+    if (original) *original = nullptr;
+    if (!target || !detour || target == detour || slots.empty()) return hook_status::invalid_address;
+    if (records_->count(target)) return hook_status::already_hooked;
+    std::vector<iat_entry> prepared;
+    prepared.reserve(slots.size());
+    for (auto slot : slots) {
+        iat_entry e{};
+        e.slot = slot; e.original = target; e.detour = detour;
+        if (!memory::capture_pages(slot, sizeof(void*), e.pages)) return hook_status::invalid_address;
+        prepared.push_back(std::move(e));
     }
-
-    hook_status iat_shadow::install(void* target, void* detour, void** original) {
-        if (original) *original = nullptr;
-        if (!target || !detour || target == detour) return hook_status::invalid_address;
-        if (iat_hooks_.count(target)) return hook_status::already_hooked;
-        auto* slot = find_resolved_iat_slot(target);
-        if (!slot) return hook_status::invalid_address;
-
-        auto previous_value = *slot;
-        iat_entry entry{};
-        entry.target = target;
-        entry.detour = detour;
-        entry.iat_slot = slot;
-        entry.real_function = previous_value;
-        entry.original = previous_value;
-        entry.patch_size = sizeof(void*);
-        std::memcpy(entry.saved_bytes, &previous_value, sizeof(previous_value));
-        entry.active = true;
-
-        
-        iat_hooks_.emplace(target, entry);
-        try {
-            hooks_.push_back({ target, detour, previous_value, sizeof(void*), {}, true });
-        }
-        catch (...) {
-            iat_hooks_.erase(target);
-            return hook_status::alloc_failed;
-        }
-        DWORD old{};
-        if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) {
-            iat_hooks_.erase(target);
-            hooks_.pop_back();
-            return hook_status::protect_failed;
-        }
-
-       
-        void* seen = InterlockedCompareExchangePointer(reinterpret_cast<PVOID volatile*>(slot),
-            detour, previous_value);
-        DWORD ignored{};
-        const bool prot_ok = VirtualProtect(slot, sizeof(void*), old, &ignored) != 0;
-        if (seen != previous_value) {
-            iat_hooks_.erase(target);
-            hooks_.pop_back();
-            return prot_ok ? hook_status::already_hooked : hook_status::partial;
-        }
-        if (original) *original = previous_value;
-        if (!prot_ok) return hook_status::partial; 
-        return hook_status::success;
+    auto inserted = records_->emplace(target, std::move(prepared));
+    auto& entries = inserted.first->second;
+    if (original) *original = target; 
+    bool committed = true;
+    for (auto& e : entries) {
+        if (!memory::make_writable(e.pages, {})) { committed = false; break; }
+        const auto seen = InterlockedCompareExchangePointer(reinterpret_cast<PVOID volatile*>(e.slot), detour, target);
+        e.active = seen == target;
+        const bool rights = memory::restore_pages(e.pages, {});
+        if (!e.active || !rights) { committed = false; break; }
     }
-
-    hook_status iat_shadow::uninstall(void* target) {
-        const auto it = iat_hooks_.find(target);
-        if (it == iat_hooks_.end()) return hook_status::not_hooked;
-        auto& item = it->second;
-        DWORD old{};
-        if (!VirtualProtect(item.iat_slot, sizeof(void*), PAGE_READWRITE, &old))
-            return hook_status::protect_failed;
-        void* seen = InterlockedCompareExchangePointer(
-            reinterpret_cast<PVOID volatile*>(item.iat_slot), item.real_function, item.detour);
-        DWORD ignored{};
-        const bool prot_ok = VirtualProtect(item.iat_slot, sizeof(void*), old, &ignored) != 0;
-        if (seen != item.detour || !prot_ok) return hook_status::partial;
-        iat_hooks_.erase(it);
-        auto pos = std::find_if(hooks_.begin(), hooks_.end(),
-            [target](const entry& x) { return x.target == target; });
-        if (pos != hooks_.end()) hooks_.erase(pos);
-        return hook_status::success;
+    if (committed) return hook_status::success;
+    bool rolled_back = true;
+    for (auto& e : entries) if (restore(e) != hook_status::success) rolled_back = false;
+    if (!rolled_back) return hook_status::partial;
+    records_->erase(inserted.first);
+    return hook_status::protect_failed;
+}
+hook_status iat_shadow::restore(iat_entry& e) {
+    if (!memory::make_writable(e.pages, {})) {
+        memory::restore_pages(e.pages, {});
+        return hook_status::partial;
     }
-
-    hook_status iat_shadow::uninstall_all() {
-        hook_status overall = hook_status::success;
-        std::vector<void*> targets;
-        targets.reserve(iat_hooks_.size());
-        for (const auto& p : iat_hooks_) targets.push_back(p.first);
-        for (auto* target : targets)
-            if (uninstall(target) != hook_status::success) overall = hook_status::partial;
-        return overall;
+    bool restored = true;
+    if (e.active) {
+        const auto seen = InterlockedCompareExchangePointer(reinterpret_cast<PVOID volatile*>(e.slot),
+                                                           e.original, e.detour);
+        restored = seen == e.detour || seen == e.original;
+        if (restored) e.active = false; 
     }
-
-    bool iat_shadow::is_hooked(void* target) const {
-        return iat_hooks_.count(target) != 0;
+    const bool rights = memory::restore_pages(e.pages, {});
+    return restored && rights ? hook_status::success : hook_status::partial;
+}
+hook_status iat_shadow::uninstall(void* target) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = records_->find(target);
+    if (it == records_->end()) return hook_status::not_hooked;
+    bool ok = true;
+    for (auto& e : it->second) if (restore(e) != hook_status::success) ok = false;
+    if (!ok) return hook_status::partial;
+    records_->erase(it);
+    return hook_status::success;
+}
+hook_status iat_shadow::uninstall_all() try {
+    std::vector<void*> targets;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& e : *records_) targets.push_back(e.first);
     }
+    auto status = hook_status::success;
+    for (auto target : targets) {
+        const auto result = uninstall(target);
+        if (result != hook_status::success && result != hook_status::not_hooked) status = hook_status::partial;
+    }
+    return status;
+}
+catch (const std::bad_alloc&) { return hook_status::alloc_failed; }
+bool iat_shadow::is_hooked(void* target) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return records_->count(target) != 0;
+}
+std::size_t iat_shadow::active_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return records_->size();
+}
 } // namespace shadowhook::ring0

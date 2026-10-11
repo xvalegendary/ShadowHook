@@ -44,4 +44,6 @@ namespace shadowhook::asm_stubs {
     void write_call_abs_safe(void* src, const void* dst) noexcept;
     void write_nop(void* dst, std::size_t count) noexcept;
     extern "C" void __cdecl asm_flush_instruction_cache(void* addr, std::size_t size);
+    extern "C" void __cdecl asm_cpuid(std::uint32_t leaf, std::uint32_t* output);
+    extern "C" void __cdecl asm_cpuid_ex(std::uint32_t leaf, std::uint32_t subleaf, std::uint32_t* output);
 } // namespace shadowhook::asm_stubs

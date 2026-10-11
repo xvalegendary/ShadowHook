@@ -26,6 +26,7 @@ extern "C" {
 
 	void sh_init(void);
 	void sh_shutdown(void);
+	int sh_shutdown_checked(void);
 
 	int  sh_hook(shadowhook::hook_type type, void* target, void* detour, void** original);
 	int  sh_unhook(void* target);

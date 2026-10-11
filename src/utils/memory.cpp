@@ -1,4 +1,6 @@
-﻿#define NOMINMAX
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "shadowhook/utils/memory.hpp"
 #include "shadowhook/utils/logger.hpp"
 #include <algorithm>
@@ -7,6 +9,66 @@
 #include <cstring>
 
 namespace shadowhook::memory {
+    bool readable_range(const void* addr, std::size_t size) {
+        auto cursor = reinterpret_cast<std::uintptr_t>(addr);
+        if (!cursor || !size || size > UINTPTR_MAX - cursor) return false;
+        const auto end = cursor + size;
+        while (cursor < end) {
+            MEMORY_BASIC_INFORMATION m{};
+            if (VirtualQuery(reinterpret_cast<void*>(cursor), &m, sizeof(m)) != sizeof(m) ||
+                m.State != MEM_COMMIT || (m.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+            const auto p = m.Protect & 0xff;
+            if (p != PAGE_READONLY && p != PAGE_READWRITE && p != PAGE_WRITECOPY &&
+                p != PAGE_EXECUTE_READ && p != PAGE_EXECUTE_READWRITE && p != PAGE_EXECUTE_WRITECOPY)
+                return false;
+            const auto base = reinterpret_cast<std::uintptr_t>(m.BaseAddress);
+            if (cursor < base || cursor - base >= m.RegionSize) return false;
+            cursor += std::min<std::size_t>(end - cursor, m.RegionSize - (cursor - base));
+        }
+        return true;
+    }
+
+    bool capture_pages(void* addr, std::size_t size, std::vector<page_protection>& pages) {
+        if (!readable_range(addr, size)) return false;
+        SYSTEM_INFO si{};
+        GetSystemInfo(&si);
+        const auto start = reinterpret_cast<std::uintptr_t>(addr);
+        const auto end = start + size;
+        const auto page_size = static_cast<std::size_t>(si.dwPageSize);
+        if (!page_size) return false;
+        pages.clear();
+        for (auto p = start - start % page_size; p < end; p += page_size) {
+            MEMORY_BASIC_INFORMATION m{};
+            if (VirtualQuery(reinterpret_cast<void*>(p), &m, sizeof(m)) != sizeof(m) ||
+                m.State != MEM_COMMIT || (m.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+            pages.push_back({reinterpret_cast<void*>(p), page_size, m.Protect, m.Protect, 0});
+            if (page_size > UINTPTR_MAX - p) return false;
+        }
+        return true;
+    }
+
+    static bool change_page(page_protection& page, DWORD protection, const patch_api& api) {
+        DWORD previous{};
+        const bool ok = api.protect(page.address, page.size, protection, &previous) != 0;
+        page.error = ok ? 0 : GetLastError();
+        MEMORY_BASIC_INFORMATION m{};
+        if (VirtualQuery(page.address, &m, sizeof(m)) == sizeof(m)) page.current = m.Protect;
+        else { page.current = 0; if (!page.error) page.error = GetLastError(); }
+        return ok && page.current == protection;
+    }
+    bool make_writable(std::vector<page_protection>& pages, const patch_api& api) {
+        for (auto& page : pages)
+            if (!change_page(page, (page.original & 0xff) >= PAGE_EXECUTE ?
+                            PAGE_EXECUTE_READWRITE : PAGE_READWRITE, api)) return false;
+        return true;
+    }
+    bool restore_pages(std::vector<page_protection>& pages, const patch_api& api) {
+        bool ok = true;
+        for (auto& page : pages)
+            if (!change_page(page, page.original, api)) ok = false;
+        return ok;
+    }
+
     bool safe_copy(void* dst, const void* src, size_t size) {
         if (!dst || !src || !size) return false;
         __try { std::memcpy(dst, src, size); return true; }

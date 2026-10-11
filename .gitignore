@@ -33,3 +33,6 @@
 .vs
 out
 upd
+tools
+tests
+docs

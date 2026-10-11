@@ -21,7 +21,7 @@ namespace shadowhook {
         virtual bool is_hooked(void* target) const = 0;
         virtual hook_type type() const = 0;
         virtual const char* name() const = 0;
-        std::size_t active_count() const { return hooks_.size(); }
+        virtual std::size_t active_count() const { return hooks_.size(); }
     protected:
         struct entry {
             void* target{};
