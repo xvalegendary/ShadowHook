@@ -2,7 +2,7 @@
 #include "shadowhook/utils/logger.hpp"
 #include <mutex>
 #ifndef SHADOWHOOK_EXPERIMENTAL
-#define SHADOWHOOK_EXPERIMENTAL 1
+#define SHADOWHOOK_EXPERIMENTAL 0
 #endif
 namespace shadowhook {
 

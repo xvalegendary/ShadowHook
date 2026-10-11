@@ -7,12 +7,17 @@
 #include <unordered_map>
 
 namespace shadowhook {
+namespace ring3 {struct vtable_options;}
 class hook_manager {
 public:
     static hook_manager& instance();
     hook_manager(const hook_manager&) = delete;
     hook_manager& operator=(const hook_manager&) = delete;
     hook_status install(hook_type type, void* target, void* detour, void** original);
+    hook_status install_vtable_slot(void* instance,const ring3::vtable_options& options,
+                                    void* detour,void** original=nullptr);
+    hook_status install_vtable_method(void* instance,void* method,const ring3::vtable_options& options,
+                                      void* detour,void** original=nullptr);
     hook_status uninstall(void* target);
     hook_status uninstall_all();
     hook_status uninstall_type(hook_type type);
@@ -26,6 +31,7 @@ public:
     original_lease pin_inline_original(void* target) const;
     std::shared_ptr<threading::execution_domain> inline_execution_domain() const;
     threading::execution_scope enter_inline_execution() const;
+    threading::execution_scope enter_vtable_execution() const;
 private:
     hook_manager();
     std::unordered_map<hook_type, std::shared_ptr<hook_base>> backends_;

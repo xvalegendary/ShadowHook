@@ -1,6 +1,7 @@
 #include "shadowhook/core/hook_manager.hpp"
 #include "shadowhook/utils/logger.hpp"
 #include "shadowhook/ring3/inline_hook.hpp"
+#include "shadowhook/ring3/vtable_hook.hpp"
 #include "shadowhook/ring3/hotpatch_hook.hpp"
 
 namespace shadowhook {
@@ -40,6 +41,29 @@ hook_status hook_manager::install(hook_type type, void* target, void* detour, vo
         if (kv.second->is_hooked(target)) return hook_status::already_hooked;
     }
     return backend->install(target, detour, original);
+}
+hook_status hook_manager::install_vtable_slot(void* instance,const ring3::vtable_options& options,
+                                               void* detour,void** original) {
+    if(original)*original=nullptr;
+    if(!instance || !detour)return hook_status::invalid_address;
+    std::lock_guard<std::mutex> lock(mutex_);
+    for(const auto& pair:backends_)if(pair.second->is_hooked(instance))return hook_status::already_hooked;
+    const auto it=backends_.find(hook_type::vtable);
+    if(it==backends_.end())return hook_status::unsupported;
+    auto backend=std::dynamic_pointer_cast<ring3::vtable_hook>(it->second);
+    return backend?backend->install_slot(instance,options,detour,original):hook_status::unsupported;
+}
+hook_status hook_manager::install_vtable_method(void* instance,void* method,
+                                                 const ring3::vtable_options& options,
+                                                 void* detour,void** original) {
+    if(original)*original=nullptr;
+    if(!instance || !detour)return hook_status::invalid_address;
+    std::lock_guard<std::mutex> lock(mutex_);
+    for(const auto& pair:backends_)if(pair.second->is_hooked(instance))return hook_status::already_hooked;
+    const auto it=backends_.find(hook_type::vtable);
+    if(it==backends_.end())return hook_status::unsupported;
+    auto backend=std::dynamic_pointer_cast<ring3::vtable_hook>(it->second);
+    return backend?backend->install_method(instance,method,options,detour,original):hook_status::unsupported;
 }
 hook_status hook_manager::uninstall(void* target) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -97,6 +121,11 @@ std::shared_ptr<threading::execution_domain> hook_manager::inline_execution_doma
 threading::execution_scope hook_manager::enter_inline_execution() const {
     auto domain = inline_execution_domain();
     return domain ? domain->enter() : threading::execution_scope{};
+}
+threading::execution_scope hook_manager::enter_vtable_execution() const {
+    auto backend=std::dynamic_pointer_cast<ring3::vtable_hook>(get_backend(hook_type::vtable));
+    // Release registry ownership lock before waiting for execution admission.
+    return backend?backend->enter_execution():threading::execution_scope{};
 }
 hook_type hook_manager::resolve_type(void* target, hook_type preferred) const {
     (void)target;

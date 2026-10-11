@@ -25,6 +25,17 @@ namespace shadowhook {
 inline threading::execution_scope enter_inline_execution() {
     return hook_manager::instance().enter_inline_execution();
 }
+inline threading::execution_scope enter_vtable_execution() {
+    return hook_manager::instance().enter_vtable_execution();
+}
+inline hook_status hook_vtable_slot(void* instance,const ring3::vtable_options& options,
+                                    void* detour,void** original=nullptr) {
+    return hook_manager::instance().install_vtable_slot(instance,options,detour,original);
+}
+inline hook_status hook_vtable_method(void* instance,void* method,const ring3::vtable_options& options,
+                                      void* detour,void** original=nullptr) {
+    return hook_manager::instance().install_vtable_method(instance,method,options,detour,original);
+}
 } // namespace shadowhook
 
 #ifdef __cplusplus

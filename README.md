@@ -154,7 +154,7 @@ For unguarded callers at explicitly prepared x64 sites, use hook_type::hotpatch.
 | :-- | :-- | :-- |
 | `inline_hook` | experimental | patches a function entry and creates a trampoline; relocation and thread-safety caveats apply |
 | `iat_shadow` | experimental | rewrites the matching iat slot of the main executable, not every loaded module |
-| `vtable` | limited | currently replaces the first vtable entry; this changes the shared table, not an instance-private clone |
+| `vtable` | limited | explicit slot/method + bounded layout; private per-instance clone or explicit shared mode; legacy API remains shared slot 0 |
 | `exception_veh` | experimental | persistent breakpoint dispatch with retained original trampoline; no single-step rearm |
 | `page_shadow` | experimental | persistent breakpoint routes into an RX shadow dispatch island; not PTE remapping |
 | `dll_hollow` | restricted owned-image mode | fully replaces an eligible private DLL image at the same base; typed image API, original snapshot and restore |
@@ -163,6 +163,8 @@ For unguarded callers at explicitly prepared x64 sites, use hook_type::hotpatch.
 | `ssdt_shadow` | placeholder | returns `unsupported`; no kernel driver integration |
 
 Registration depends on SHADOWHOOK_EXPERIMENTAL. EPT/SSDT remain stubs; their registration is not implementation.
+
+See [vtable API, instance lifetime and RTTI contracts](docs/vtable-hooks.md) for instance-local usage.
 
 ## limitations
 
