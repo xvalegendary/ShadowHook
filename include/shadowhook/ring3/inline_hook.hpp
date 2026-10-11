@@ -31,6 +31,7 @@ public:
     hook_type type() const override { return hook_type::inline_hook; }
     const char* name() const override { return "inline_hook"; }
     hook_status configure_execution(std::shared_ptr<threading::execution_domain> domain);
+    std::shared_ptr<threading::execution_domain> execution_domain() const;
     original_lease pin_original(void* target) const;
     bool inspect(void* target, patch_report& report) const;
     std::size_t retired_count() const;

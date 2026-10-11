@@ -87,6 +87,16 @@ original_lease hook_manager::pin_inline_original(void* target) const {
     const auto* backend = dynamic_cast<const ring3::inline_hook*>(it->second.get());
     return backend ? backend->pin_original(target) : original_lease{};
 }
+std::shared_ptr<threading::execution_domain> hook_manager::inline_execution_domain() const {
+    auto backend = std::dynamic_pointer_cast<ring3::inline_hook>(get_backend(hook_type::inline_hook));
+    return backend ? backend->execution_domain() : nullptr;
+}
+threading::execution_scope hook_manager::enter_inline_execution() const {
+    // Release registry/backend locks before waiting for admission. Executing
+    // detours may need the registry lock to obtain their original lease.
+    auto domain = inline_execution_domain();
+    return domain ? domain->enter() : threading::execution_scope{};
+}
 hook_type hook_manager::resolve_type(void* target, hook_type preferred) const {
     (void)target;
     return preferred;

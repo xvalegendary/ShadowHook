@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "hook_base.hpp"
 #include "original_lease.hpp"
+#include "shadowhook/utils/thread_quiescence.hpp"
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -23,6 +24,8 @@ public:
 
 
     original_lease pin_inline_original(void* target) const;
+    std::shared_ptr<threading::execution_domain> inline_execution_domain() const;
+    threading::execution_scope enter_inline_execution() const;
 private:
     hook_manager();
     std::unordered_map<hook_type, std::shared_ptr<hook_base>> backends_;

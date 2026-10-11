@@ -17,8 +17,8 @@
 ---
 
 > [!IMPORTANT]
-> **Hardening API update:** inline patching requires an explicitly configured cooperative
-> execution domain covering every full target/original call. Unwind-sensitive prologues
+> **Hardening API update:** sh_init() supplies a cooperative execution domain.
+> Every full target/original call must use shadowhook::enter_inline_execution(). Unwind-sensitive prologues
 > are rejected. Raw originals are retained for process lifetime; leases reclaim storage
 > after the last owner releases it. See [migration and contracts](docs/hardening.md).
 > The API monitor now uses atomic IAT slot exchange.
@@ -88,68 +88,45 @@ add_subdirectory(external/ShadowHook)
 target_link_libraries(my_app PRIVATE shadowhook)
 ```
 
-`shadowhook` publishes its include directory through `target_include_directories`, so consumers can include `shadowhook/shadowhook.h`. the example is currently built unconditionally by the upstream cmake file.
+`shadowhook` publishes its include directory through `target_include_directories`, so consumers can include `shadowhook/shadowhook.h`. the example is controlled by SHADOWHOOK_BUILD_EXAMPLES.
 
 ## usage
 
 <img src="assets/readme/lifecycle.svg" width="100%" alt="hook lifecycle: initialize, resolve, install, invoke, unhook, shutdown" />
 
-### inline hook · messageboxa
+### inline hook · cooperative execution
 
-this example follows the repository's `api_monitor` flow while checking the return status and keeping the original trampoline pointer separate from the exported target address.
+sh_init() registers inline_hook with its own shared execution domain. An eligible
+leaf target can be installed through the normal API; every call path still needs
+to enter the backend's domain BEFORE executing target/original code.
 
-```cpp
-#include "shadowhook/shadowhook.h"
-#include <windows.h>
+~~~cpp
+sh_init();
+auto& manager = shadowhook::hook_manager::instance();
+auto status = static_cast<shadowhook::hook_status>(
+    sh_hook(shadowhook::hook_type::inline_hook, target, detour, nullptr));
+if (status != shadowhook::hook_status::success) return;
 
-using message_box_fn = int (WINAPI*)(HWND, LPCSTR, LPCSTR, UINT);
-static message_box_fn original_message_box = nullptr;
+auto original = manager.pin_inline_original(target);
+{
+    auto executing = shadowhook::enter_inline_execution();
+    if (!executing) return;
+    reinterpret_cast<function_pointer>(target)();
+    if (original) original.as<function_pointer>()();
+} // full call has returned; unhook can now acquire quiescence
+sh_unhook(target);
+sh_shutdown_checked();
+~~~
 
-int WINAPI intercept_message_box(HWND owner, LPCSTR, LPCSTR caption, UINT flags) {
-    return original_message_box(owner, "intercepted by shadowhook", caption, flags);
-}
+A default domain is not a process-wide stop-the-world mechanism: unregistered
+threads/callbacks are not coordinated. Unwind-sensitive/unsupported prologues
+remain rejected. See [contracts and migration](docs/hardening.md).
 
-int main() {
-    sh_init();
+api_monitor uses IAT exchange for MessageBoxA. The manual --inline-demo mode
+demonstrates the default inline path on a controlled leaf function.
 
-    const HMODULE user32 = LoadLibraryA("user32.dll");
-    if (!user32) {
-        sh_shutdown();
-        return 1;
-    }
-
-    auto* target = reinterpret_cast<void*>(GetProcAddress(user32, "MessageBoxA"));
-    if (!target) {
-        FreeLibrary(user32);
-        sh_shutdown();
-        return 1;
-    }
-
-    void* trampoline = nullptr;
-    const auto status = static_cast<shadowhook::hook_status>(
-        sh_hook(shadowhook::hook_type::inline_hook,
-                target, reinterpret_cast<void*>(&intercept_message_box), &trampoline));
-
-    if (status != shadowhook::hook_status::success) {
-        FreeLibrary(user32);
-        sh_shutdown();
-        return 1;
-    }
-
-    original_message_box = reinterpret_cast<message_box_fn>(trampoline);
-    reinterpret_cast<message_box_fn>(target)(nullptr, "hello", "demo", MB_OK);
-
-    const int unhook_status = sh_unhook(target);
-    original_message_box = nullptr; // safe only after in-flight calls are quiescent
-
-    FreeLibrary(user32);
-    sh_shutdown();
-    return unhook_status == static_cast<int>(shadowhook::hook_status::success) ? 0 : 1;
-}
-```
-
-> [!WARNING]
-> an installed inline hook is **not proof that the trampoline is safe to execute**. the current implementation copies displaced instructions without generally relocating rip-relative operands or relative control flow. the example must be validated against the actual target prologue before using the `original` function pointer. patch/unpatch while other threads execute the target is also unsafe without coordination.
+CMake builds no tests: CTest registration and all test/probe targets are removed.
+Existing test source files are retained without being compiled.
 
 ### api reference
 

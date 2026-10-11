@@ -89,6 +89,10 @@ bool inline_hook::healthy_locked() const {
         if (kv.second->state == patch_state::failed) return false;
     return true;
 }
+std::shared_ptr<threading::execution_domain> inline_hook::execution_domain() const {
+    std::lock_guard<std::mutex> lock(runtime_->mutex);
+    return runtime_->domain;
+}
 original_lease inline_hook::pin_original(void* target) const {
     std::lock_guard<std::mutex> lock(runtime_->mutex);
     const auto it = runtime_->entries.find(target);

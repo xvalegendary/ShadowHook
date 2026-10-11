@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <chrono>
+#include <memory>
 
 namespace {
 using message_box = int(WINAPI*)(HWND, LPCSTR, LPCSTR, UINT);
@@ -113,14 +114,84 @@ void* slot_value(void** slot) {
     void* value{};
     return shadowhook::memory::safe_copy(&value, slot, sizeof(value)) ? value : nullptr;
 }
+
+int inline_demo_detour() { return 8; }
+
+int run_inline_demo() {
+    sh_init();
+    auto& manager = shadowhook::hook_manager::instance();
+    auto domain = manager.inline_execution_domain();
+    if (!domain) {
+        SH_LOG_ERROR("Default inline execution domain is missing");
+        return 6;
+    }
+    using function = int(*)();
+    const std::uint8_t code[] = {0xB8,7,0,0,0,
+        0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0xC3};
+    auto owner = std::unique_ptr<void, decltype(&shadowhook::memory::free_rwx)>(
+        shadowhook::memory::allocate_rwx(4096), &shadowhook::memory::free_rwx);
+    if (!owner) return 6;
+    auto* target = owner.get();
+    std::memcpy(target, code, sizeof(code));
+    DWORD old{};
+    if (!VirtualProtect(target, 4096, PAGE_EXECUTE_READ, &old) ||
+        !FlushInstructionCache(GetCurrentProcess(), target, sizeof(code))) return 6;
+    const auto fn = reinterpret_cast<function>(target);
+
+    const bool passed = [&] {
+        {
+            auto executing = shadowhook::enter_inline_execution();
+            if (!executing || fn() != 7) return false;
+        }
+        const auto installed = static_cast<shadowhook::hook_status>(sh_hook(
+            shadowhook::hook_type::inline_hook, target,
+            reinterpret_cast<void*>(&inline_demo_detour), nullptr));
+        SH_LOG_INFO("Default inline install | status=%s", shadowhook::status_str(installed));
+        if (installed != shadowhook::hook_status::success) return false;
+        auto lease = manager.pin_inline_original(target);
+        if (!lease) return false;
+        {
+            auto executing = shadowhook::enter_inline_execution();
+            if (!executing) return false;
+            const auto hooked = fn();
+            const auto original_value = lease.as<function>()();
+            const auto busy = static_cast<shadowhook::hook_status>(sh_unhook(target));
+            SH_LOG_INFO("Guarded call | target=%d, original=%d, active=%zu, unhook=%s",
+                        hooked, original_value, domain->active_calls(), shadowhook::status_str(busy));
+            if (hooked != 8 || original_value != 7 || busy != shadowhook::hook_status::busy) return false;
+        }
+        const auto removed = static_cast<shadowhook::hook_status>(sh_unhook(target));
+        if (removed != shadowhook::hook_status::success || sh_is_hooked(target)) return false;
+        {
+            auto executing = shadowhook::enter_inline_execution();
+            if (!executing) return false;
+            const auto restored = fn();
+            const auto retained = lease.as<function>()();
+            SH_LOG_INFO("After unhook | target=%d, retained original=%d", restored, retained);
+            if (restored != 7 || retained != 7 || std::memcmp(target, code, sizeof(code)) != 0) return false;
+        }
+        return true;
+    }();
+
+    const auto shutdown = static_cast<shadowhook::hook_status>(sh_shutdown_checked());
+    if (shutdown != shadowhook::hook_status::success || sh_is_hooked(target)) {
+        // A retained patch/recovery record still refers to this target allocation.
+        (void)owner.release();
+        SH_LOG_ERROR("Inline demo shutdown failed; target allocation retained");
+        return 6;
+    }
+    SH_LOG_INFO("Default inline demo | %s, shutdown=%s", passed ? "PASS" : "FAIL", shadowhook::status_str(shutdown));
+    return passed ? 0 : 6;
+}
 } // namespace
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    if (argc == 2 && std::strcmp(argv[1], "--inline-demo") == 0) return run_inline_demo();
     const bool self_test = argc == 2 && std::strcmp(argv[1], "--self-test") == 0;
     if (argc > 1 && !self_test) {
-        SH_LOG_WARN("Usage: api_monitor [--self-test]");
+        SH_LOG_WARN("Usage: api_monitor [--self-test | --inline-demo]");
         return 1;
     }
     char executable[32768]{};

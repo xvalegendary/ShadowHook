@@ -20,6 +20,14 @@
 #include "shadowhook/utils/pattern_scan.hpp"
 #include "shadowhook/utils/asm_stubs.hpp"
 
+namespace shadowhook {
+// Enter BEFORE target/original invocation and retain until the full call returns.
+// This enrolls only the caller; other process threads do not participate implicitly.
+inline threading::execution_scope enter_inline_execution() {
+    return hook_manager::instance().enter_inline_execution();
+}
+} // namespace shadowhook
+
 #ifdef __cplusplus
 extern "C" {
 #endif
