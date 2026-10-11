@@ -50,11 +50,11 @@ namespace shadowhook {
             std::make_shared<threading::execution_domain>()));
         mgr.register_backend(std::make_unique<ring0::iat_shadow>());
         mgr.register_backend(std::make_unique<ring3::hotpatch_hook>());
-#if SHADOWHOOK_EXPERIMENTAL
         mgr.register_backend(std::make_unique<ring3::vtable_hook>());
         mgr.register_backend(std::make_unique<ring3::exception_hook>());
         mgr.register_backend(std::make_unique<ring0::page_shadow>());
         mgr.register_backend(std::make_unique<ring3::dll_hollow>());
+#if SHADOWHOOK_EXPERIMENTAL
         mgr.register_backend(std::make_unique<ring0::ept_hook>());
         mgr.register_backend(std::make_unique<ring0::ssdt_shadow>());
 #endif
