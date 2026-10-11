@@ -152,13 +152,13 @@ For unguarded callers at explicitly prepared x64 sites, use hook_type::hotpatch.
 
 | backend | behavior / scope |
 | :-- | :-- | :-- |
-| `inline_hook` |  patches a function entry and creates a trampoline; relocation and thread-safety caveats apply |
+| `inline_hook` | patches a function entry and creates a trampoline; relocation and thread-safety caveats apply |
 | `iat_shadow` | rewrites the matching iat slot of the main executable, not every loaded module |
-| `vtable` |  explicit slot/method + bounded layout; private per-instance clone or explicit shared mode; legacy API remains shared slot 0 |
+| `vtable` | explicit slot/method + bounded layout; private per-instance clone or explicit shared mode; legacy API remains shared slot 0 |
 | `exception_veh` | persistent breakpoint dispatch with retained original trampoline; no single-step rearm |
 | `page_shadow` | persistent breakpoint routes into an RX shadow dispatch island; not PTE remapping |
 | `dll_hollow` | fully replaces an eligible private DLL image at the same base; typed image API, original snapshot and restore |
-| `hotpatch` |  atomic aligned entry switch; immutable relay and original body |
+| `hotpatch` | atomic aligned entry switch; immutable relay and original body |
 | `ept` | not ready |
 | `ssdt_shadow` | not ready |
 
