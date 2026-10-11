@@ -1,74 +1,84 @@
 <div align="center">
 
-<img src="assets/logo.png" width="680" alt="shadowhook logo" />
+<img src="assets/logo.png" width="650" alt="shadowhook" />
 
-<img src="assets/readme/hero.svg" width="940" alt="shadowhook — windows hooking research framework, c++17, x64, cmake" />
+<img src="assets/readme/hero.svg" width="940" alt="shadowhook — windows x64 hooking toolkit" />
 
 <br />
 
-<sub>experimental windows instrumentation · function redirection · backend-driven design</sub>
+**a custom c++17 hooking toolkit for windows x64**
 
-<br /><br />
+inline detours · iat redirection · vtable hooks · veh breakpoints · native hotpatching · pe image replacement
 
-[overview](#overview) &nbsp;·&nbsp; [architecture](#architecture) &nbsp;·&nbsp; [quick start](#quick-start) &nbsp;·&nbsp; [usage](#usage) &nbsp;·&nbsp; [backends](#backends) &nbsp;·&nbsp; [limitations](#limitations)
+<br />
+
+[getting started](#getting-started) · [features](#features) · [usage](#usage) · [api reference](#api-reference) · [documentation](#documentation)
 
 </div>
 
 ---
 
-> [!IMPORTANT]
-> **Hardening API update:** sh_init() supplies a cooperative execution domain.
-> Every full inline target/original call must use shadowhook::enter_inline_execution().
-> Eligible V1 flags=0 unwind prologues have registered relocated metadata; unsupported
-> formats fail closed. Published original code is retained for process lifetime.
-> See [current runtime contracts](docs/runtime-backends.md).
-> The API monitor now uses atomic IAT slot exchange.
-
 ## overview
 
-**shadowhook** is an experimental windows x64 hooking library built in c++17. it exposes a small public api backed by a registry of interchangeable hook implementations. the repository is intended for learning, instrumentation, debugging, and authorized security research.
+**shadowhook** is a modular windows x64 hooking library written in modern c++. it provides a consistent interface for intercepting functions, redirecting execution, and managing hook lifecycles — while keeping the low-level implementation in your own codebase.
 
-- **one entry point** — install, query, and remove hooks through `sh_hook` / `sh_unhook`.
-- **multiple strategies** — inline patches, import-address-table replacement, vtable modification, and exception-based redirection.
-- **observable state** — named backend statuses and configurable logging.
-- **static integration** — cmake target `shadowhook` and a bundled `api_monitor` example.
+use it to build debuggers, instrumentation tools, profiling utilities, reverse-engineering workflows, and custom windows internals experiments.
 
-> [!IMPORTANT]
-> this is **research code, not a hardened hooking engine**. having a registered backend does not imply that it is complete, production-safe, or suitable for concurrent patching. in particular, ept and ssdt are placeholders returning `unsupported`.
+- **multiple hooking strategies** — choose the right backend for your target.
+- **custom x64 relocation** — decode and relocate supported instructions into executable trampolines.
+- **managed lifecycle** — install, inspect, restore, and query hooks through a central manager.
+- **memory-aware patching** — track page protections, flush the instruction cache, and report operation status.
+- **built-in logging** — lightweight console output with configurable verbosity.
+- **easy integration** — c++17, cmake, msvc, and a static library target.
+
+## features
+
+| backend | what it does | best suited for |
+| :-- | :-- | :-- |
+| **inline hook** | redirects the function entry through a nearby relay; relocates original instructions to a trampoline | controlled native function interception |
+| **iat hook** | swaps imported function pointers in a module's import address table | winapi monitoring inside your application |
+| **vtable hook** | replaces a selected virtual method, using a private cloned table or an explicit shared slot | c++ objects and virtual interfaces |
+| **veh hook** | uses an `int3` breakpoint and vectored exception dispatch to redirect execution | exception-driven instrumentation |
+| **page shadow** | redirects an `int3` breakpoint into an executable shadow dispatch island | alternate breakpoint-based routing |
+| **hotpatch** | atomically switches the entry of an explicitly prepared hotpatchable function | native hotpatch sites and live callers |
+| **dll image replacement** | loads an owned pe image, replaces it within its reserved address space, and supports restoring a snapshot | controlled image replacement experiments |
+
+`page_shadow` is a user-mode breakpoint/shadow-island backend, not an ept or pte remapper. `dll_hollow` exposes its own image API rather than the generic function-hook call. kernel-only ept/ssdt stubs are separate from the user-mode feature set.
 
 ## architecture
 
-<img src="assets/readme/architecture.svg" width="100%" alt="api calls enter the hook manager, which dispatches to experimental backends and returns hook status" />
-
-<details>
-<summary>explore the source layout</summary>
+<img src="assets/readme/architecture.svg" width="100%" alt="shadowhook architecture" />
 
 ```text
-include/shadowhook/
-  shadowhook.h             public entry points
-  core/                    types, manager, hook abstractions
-  ring3/                   inline, vtable, veh, dll_hollow
-  ring0/                   page, iat, ept, ssdt declarations
-  utils/                   memory, decoder, logging, scanning
-src/
-  shadowhook.cpp           registration + public api bridge
-  core/                    manager and hook lifecycle
-  ring3/                   user-mode hook backends
-  ring0/                   mixed user-mode code and stubs
-  utils/                   memory, logging, instruction helpers
-examples/
-  api_monitor.cpp          messageboxa instrumentation demo
-assets/
-  logo.png                 project artwork
+application
+    |
+    v
+shadowhook public api
+    |
+    v
+hook_manager  ───────────────  hook_status / logging
+    |
+    +── inline_hook        +── hotpatch_hook
+    +── iat_shadow         +── vtable_hook
+    +── exception_veh      +── page_shadow
+    +── dll_hollow (owned image api)
+    |
+    v
+memory · x64 decoder · relocation · execution domains
 ```
 
-**note:** the `ring0/` directory name does **not** mean the cmake target is a kernel-mode driver. the project currently builds a user-mode static library.
+Each backend owns its hook records and implements the shared hook interface. The manager handles registration, dispatch, conflict detection, and cleanup.
 
-</details>
+## getting started
 
-## quick start
+### requirements
 
-**requirements:** windows x64, cmake 3.16+, a c++17-capable msvc toolchain, windows sdk, and masm support for the x64 assembly source.
+- **windows x64**
+- **visual studio 2022** with the msvc c++ toolchain, windows sdk, and x64 masm support
+- **cmake 3.16+**
+- **c++17**
+
+### build
 
 ```powershell
 git clone https://github.com/xvalegendary/ShadowHook.git
@@ -76,116 +86,306 @@ cd ShadowHook
 
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
-
-.\build\Release\api_monitor.exe
 ```
 
-this builds the **static library** `shadowhook` and the example executable `api_monitor`. the example hooks `MessageBoxA` in its own process, calls it, then removes the hook.
+This produces the static `shadowhook` library and the `api_monitor` example.
 
-for an existing cmake application, add the repository as a subdirectory:
+### run the examples
+
+```powershell
+# iat hook: intercept messageboxa in the example executable
+.\build\Release\api_monitor.exe
+
+# iat hook: automated messageboxa checks
+.\build\Release\api_monitor.exe --self-test
+
+# inline hook: controlled function + original trampoline
+.\build\Release\api_monitor.exe --inline-demo
+
+# hotpatch: prepared site, relay, and concurrent calls
+.\build\Release\api_monitor.exe --hotpatch-demo
+```
+
+### add shadowhook to a cmake project
 
 ```cmake
+set(SHADOWHOOK_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(external/ShadowHook)
 target_link_libraries(my_app PRIVATE shadowhook)
 ```
 
-`shadowhook` publishes its include directory through `target_include_directories`, so consumers can include `shadowhook/shadowhook.h`. the example is controlled by SHADOWHOOK_BUILD_EXAMPLES.
+Include the public entry point with:
+
+```cpp
+#include "shadowhook/shadowhook.h"
+```
 
 ## usage
 
-<img src="assets/readme/lifecycle.svg" width="100%" alt="hook lifecycle: initialize, resolve, install, invoke, unhook, shutdown" />
+<img src="assets/readme/lifecycle.svg" width="100%" alt="initialize, install, invoke, unhook, shutdown" />
 
-### inline hook · cooperative execution
+### 01 / iat hook — intercept `MessageBoxA`
 
-sh_init() registers inline_hook with its own shared execution domain. An eligible
-leaf or supported unwind-covered target can be installed through the normal API; every call path still needs
-to enter the backend's domain BEFORE executing target/original code.
+A complete example using the main executable's import address table. Link the application with `user32.lib` (or `user32` in cmake).
 
-~~~cpp
+```cpp
+#include "shadowhook/shadowhook.h"
+#include <windows.h>
+
+using message_box_fn = int (WINAPI*)(HWND, LPCSTR, LPCSTR, UINT);
+static message_box_fn original_message_box = nullptr;
+
+int WINAPI message_box_detour(HWND window, LPCSTR text,
+                              LPCSTR caption, UINT flags) {
+    SH_LOG_INFO("messageboxa intercepted: %s", text ? text : "(null)");
+    return original_message_box(window, "intercepted by shadowhook", caption, flags);
+}
+
+int main() {
+    sh_init();
+
+    auto* module = GetModuleHandleW(L"user32.dll");
+    void* target = module
+        ? reinterpret_cast<void*>(GetProcAddress(module, "MessageBoxA"))
+        : nullptr;
+
+    void* original = nullptr;
+    auto status = static_cast<shadowhook::hook_status>(
+        sh_hook(shadowhook::hook_type::iat_shadow,
+                target,
+                reinterpret_cast<void*>(&message_box_detour),
+                &original));
+
+    if (status != shadowhook::hook_status::success || !original) {
+        SH_LOG_ERROR("iat hook failed: %s", shadowhook::status_str(status));
+        sh_shutdown_checked();
+        return 1;
+    }
+
+    original_message_box = reinterpret_cast<message_box_fn>(original);
+    MessageBoxA(nullptr, "hello, world", "shadowhook", MB_OK);
+
+    const auto removed = static_cast<shadowhook::hook_status>(sh_unhook(target));
+    const auto shutdown = static_cast<shadowhook::hook_status>(sh_shutdown_checked());
+    return removed == shadowhook::hook_status::success &&
+           shutdown == shadowhook::hook_status::success ? 0 : 1;
+}
+```
+
+The default `iat_shadow` call searches matching imports in the **main executable**. To target another owned module or a specific slot, use `iat_shadow::install_module()` or `iat_shadow::install_slot()`.
+
+### 02 / inline hook — original trampoline
+
+The inline backend installs a relative entry jump to a nearby relay and relocates the displaced instructions. Use `original_lease` to keep the trampoline alive while calling the original function.
+
+```cpp
+// target and detour are function addresses with matching signatures.
+// the host must coordinate all target/original calls through this domain.
+
 sh_init();
+
+using function_fn = int(*)();
 auto& manager = shadowhook::hook_manager::instance();
+
 auto status = static_cast<shadowhook::hook_status>(
     sh_hook(shadowhook::hook_type::inline_hook, target, detour, nullptr));
-if (status != shadowhook::hook_status::success) return;
 
-auto original = manager.pin_inline_original(target);
-{
-    auto executing = shadowhook::enter_inline_execution();
-    if (!executing) return;
-    reinterpret_cast<function_pointer>(target)();
-    if (original) original.as<function_pointer>()();
-} // full call has returned; unhook can now acquire quiescence
-sh_unhook(target);
+if (status == shadowhook::hook_status::success) {
+    auto original = manager.pin_inline_original(target);
+
+    {
+        auto execution = shadowhook::enter_inline_execution();
+        if (execution) {
+            auto hooked = reinterpret_cast<function_fn>(target)();
+            if (original) {
+                auto before_hook = original.as<function_fn>()();
+                (void)before_hook;
+            }
+            (void)hooked;
+        }
+    } // execution has ended before unhook
+
+    sh_unhook(target);
+}
+
 sh_shutdown_checked();
-~~~
+```
 
-A default domain is not a process-wide stop-the-world mechanism: unregistered
-threads/callbacks are not coordinated. Unwind-sensitive/unsupported prologues
-remain rejected. See [contracts and migration](docs/hardening.md).
+For inline hooks, the execution domain covers the **entire** call, including calls that bypass the detour. See [`docs/hardening.md`](docs/hardening.md) and [`docs/runtime-backends.md`](docs/runtime-backends.md) for the execution and relocation contracts. The runnable reference is `api_monitor --inline-demo`.
 
-api_monitor uses IAT exchange for MessageBoxA. The manual --inline-demo mode
-demonstrates the default inline path on a controlled leaf function.
+### 03 / vtable hook — one object, one method
 
-CMake builds no tests: CTest registration and all test/probe targets are removed.
-Existing test source files are retained without being compiled.
+Select the exact vtable slot and method count. The default `instance_local` mode clones the table and replaces the chosen object's vfptr without modifying the shared source table.
 
-### native hotpatch mode
+```cpp
+sh_init();
 
-For unguarded callers at explicitly prepared x64 sites, use hook_type::hotpatch. It atomically switches an aligned two-byte NOP entry through an immutable relay; unsupported layouts are rejected. This is not a generic arbitrary-prologue patcher. See [required site contract and process-lifetime retention](docs/hotpatch.md). Run api_monitor --hotpatch-demo for the manual concurrent example.
+shadowhook::ring3::vtable_options options{};
+options.slot = 1;           // selected virtual method
+options.method_count = 3;   // actual abi method count
+options.prefix_slots = 1;   // msvc rtti; use 0 for com/no-rtti tables
+options.mode = shadowhook::ring3::vtable_mode::instance_local;
 
-### api reference
+void* original = nullptr;
+auto status = shadowhook::hook_vtable_slot(instance, options, detour, &original);
 
-| call | purpose |
+if (status == shadowhook::hook_status::success) {
+    {
+        auto execution = shadowhook::enter_vtable_execution();
+        if (execution) {
+            // invoke the selected virtual method through the object here
+        }
+    }
+    sh_unhook(instance);
+}
+
+sh_shutdown_checked();
+```
+
+Use `shadowhook::hook_vtable_method()` when you know the unique raw method address instead of the slot. Use `vtable_mode::shared_slot` when the intention is to change the class-wide table. See [`docs/vtable-hooks.md`](docs/vtable-hooks.md) for ABI layout and ownership.
+
+### 04 / veh, page shadow, and hotpatch
+
+These backends use the same lifecycle API:
+
+```cpp
+sh_init();
+
+// choose one strategy for the target
+const auto kind = shadowhook::hook_type::exception_veh;
+// alternatives: page_shadow, hotpatch
+
+void* original = nullptr;
+auto status = static_cast<shadowhook::hook_status>(
+    sh_hook(kind, target, detour, &original));
+
+if (status == shadowhook::hook_status::success) {
+    // call the target and/or its original using the matching function signature
+    sh_unhook(target);
+}
+
+sh_shutdown_checked();
+```
+
+- **veh** places an `int3` at the target and dispatches through a vectored exception handler.
+- **page shadow** uses breakpoint dispatch to enter an executable shadow island.
+- **hotpatch** expects an explicitly prepared x64 entry (`66 90` plus five reserved bytes before it); see [`docs/hotpatch.md`](docs/hotpatch.md).
+
+### 05 / owned dll image replacement
+
+`dll_hollow` is a dedicated owned-image workflow, not a regular function detour. Load a supported private pe image, replace it with another compatible image, optionally call a snapshot of the original, then restore it.
+
+```cpp
+using shadowhook::hook_status;
+using shadowhook::ring3::dll_hollow;
+using shadowhook::ring3::owned_dll_image;
+
+dll_hollow loader;
+owned_dll_image live, previous;
+
+if (loader.load_image(L"original.dll", live, 1024 * 1024) == hook_status::success) {
+    if (loader.replace_image(live, L"replacement.dll", &previous) == hook_status::success) {
+        {
+            auto export_fn = live.pin_export("Value");
+            if (export_fn) {
+                int result = export_fn.as<int(*)(int)>()(42);
+                (void)result;
+            }
+        } // release export lease before restoration
+
+        loader.restore_image(live);
+    }
+}
+```
+
+This workflow targets **privately owned, compatible native x64 images**. See [`docs/runtime-backends.md`](docs/runtime-backends.md) for the image format and lifetime rules.
+
+## api reference
+
+| api | description |
 | :-- | :-- |
-| `sh_init()` | register available hook backends |
-| `sh_hook(type, target, detour, original)` | attempt to install one hook; returns an integer `hook_status` |
-| `sh_unhook(target)` | remove a hook by its original target address |
-| `sh_unhook_all()` | ask every registered backend to remove its hooks |
-| `sh_is_hooked(target)` | return `1` or `0` for tracked hooks |
-| `sh_dump_status()` | log active counts by backend |
-| `sh_set_log_level(level)` | set logger verbosity using the logger's integer enum values |
-| `sh_shutdown()` | attempt cleanup through the manager |
+| `sh_init()` | initialize shadowhook and register the user-mode backends |
+| `sh_hook(type, target, detour, original)` | install a function hook through the selected backend |
+| `sh_unhook(target)` | restore a hooked target |
+| `sh_unhook_all()` | remove all registered active hooks |
+| `sh_is_hooked(target)` | check whether a target is currently tracked |
+| `sh_dump_status()` | print active backend counts |
+| `sh_set_log_level(level)` | configure console log verbosity (`0`–`4`) |
+| `sh_shutdown_checked()` | perform cleanup and return a status |
+| `sh_shutdown()` | compatibility cleanup call without a return value |
+| `hook_manager::instance().pin_inline_original(target)` | obtain a managed original trampoline lease |
+| `shadowhook::enter_inline_execution()` | enter the cooperative inline execution domain |
+| `shadowhook::hook_vtable_slot(...)` | install a vtable hook with an explicit layout and slot |
+| `shadowhook::hook_vtable_method(...)` | select a vtable method by its raw address |
+| `shadowhook::enter_vtable_execution()` | enter the cooperative vtable execution domain |
 
-`sh_hook` and `sh_unhook` use values from `shadowhook::hook_status`, including `success`, `already_hooked`, `not_hooked`, `invalid_address`, `alloc_failed`, `protect_failed`, `unsupported`, and `partial`. only treat `success` as a successful installation.
+### status codes
 
-## backends
+Every `sh_hook()` and `sh_unhook()` call returns a `hook_status` code (as an integer). Convert it with `shadowhook::status_str()` when logging.
 
-| backend | behavior / scope |
+```cpp
+const auto status = static_cast<shadowhook::hook_status>(sh_unhook(target));
+SH_LOG_INFO("unhook status: %s", shadowhook::status_str(status));
+```
+
+| status | meaning |
 | :-- | :-- |
-| `inline_hook` | patches a function entry and creates a trampoline; relocation and thread-safety caveats apply |
-| `iat_shadow` | rewrites the matching iat slot of the main executable, not every loaded module |
-| `vtable` | explicit slot/method + bounded layout; private per-instance clone or explicit shared mode; legacy API remains shared slot 0 |
-| `exception_veh` | persistent breakpoint dispatch with retained original trampoline; no single-step rearm |
-| `page_shadow` | persistent breakpoint routes into an RX shadow dispatch island; not PTE remapping |
-| `dll_hollow` | fully replaces an eligible private DLL image at the same base; typed image API, original snapshot and restore |
-| `hotpatch` | atomic aligned entry switch; immutable relay and original body |
-| `ept` | not ready |
-| `ssdt_shadow` | not ready |
+| `success` | operation completed |
+| `already_hooked` / `not_hooked` | target is already registered / is not registered |
+| `invalid_address` | target, detour, or memory layout is not valid for the operation |
+| `alloc_failed` | required allocation could not be completed |
+| `protect_failed` | memory protection operation failed |
+| `unsupported` | target or backend does not match the selected implementation |
+| `busy` | execution or mutation is currently in progress |
+| `partial` | incomplete transaction; recovery may be required |
 
-Registration depends on SHADOWHOOK_EXPERIMENTAL. EPT/SSDT remain stubs; their registration is not implementation.
+### logging
 
-See [vtable API, instance lifetime and RTTI contracts](docs/vtable-hooks.md) for instance-local usage.
+```text
+[+] hook_manager initialized
+[+] registering backend: inline_hook
+[+] registering backend: iat_shadow
+[~] installing messageboxa hook...
+[+] hk installed | backend=iat_shadow
+[~] removing messageboxa hook...
+[+] hk removed
+```
 
-## limitations
+The logger exposes `SH_LOG_INFO`, `SH_LOG_STEP`, `SH_LOG_WARN`, `SH_LOG_ERROR`, `SH_LOG_DEBUG`, and `SH_LOG_VERBOSE`.
 
-- **architecture:** code paths assume windows x64 (`rip`, `image_nt_headers64`, and x64 jump stubs). other architectures are not established as supported.
-- **instruction rewriting:** RIP-relative operands, relative calls/jumps and Jcc are relocated for the decoded subset; unknown encodings and unsupported unwind formats are rejected.
-- **execution safety:** patches, executable memory permissions, and hook removal need a robust concurrency and in-flight-call strategy before production use.
-- **backend semantics:** registered backends vary substantially in completeness. directory names are not privilege boundaries.
-- **cleanup reporting:** shutdown skips inactive backends; partial rollback retains runtime state and reports failure.
-- **language boundary:** despite `extern "C"` linkage, the public header exposes a c++ enum parameter and is therefore a **c++ api** as currently declared.
-- **validation:** this readme documents the current implementation; it does not imply a successful windows build or runtime test on every target build.
+## project layout
 
-## development notes
+```text
+shadowhook/
+├── include/shadowhook/
+│   ├── shadowhook.h       public api
+│   ├── core/              manager, status types, hook contracts
+│   ├── ring3/             inline, vtable, veh, hotpatch, image replacement
+│   ├── ring0/             iat, page shadow, and kernel stub declarations
+│   └── utils/             memory, decoder, logging, scanning
+├── src/                   backend implementations and internals
+├── examples/
+│   └── api_monitor.cpp    iat, inline, and hotpatch demos
+├── docs/                  runtime contracts and detailed guides
+└── assets/                shadowhook artwork
+```
 
-begin with [`examples/api_monitor.cpp`](examples/api_monitor.cpp), then follow `sh_hook` into [`src/shadowhook.cpp`](src/shadowhook.cpp) and [`src/core/hook_manager.cpp`](src/core/hook_manager.cpp). each implementation lives under `src/ring3/` or `src/ring0/` and derives from the common backend abstraction.
+## documentation
 
-for trustworthy hook engines, prioritize disassembly and relocation correctness, atomic patch strategies, page-protection restoration, instruction-cache coherency, module lifetime, and structured teardown. **correctness before stealth.**
+| guide | topic |
+| :-- | :-- |
+| [`docs/runtime-backends.md`](docs/runtime-backends.md) | inline, veh, page shadow, hotpatch, and owned-image behavior |
+| [`docs/vtable-hooks.md`](docs/vtable-hooks.md) | instance-local hooks, shared slots, rtti, and object lifetime |
+| [`docs/hotpatch.md`](docs/hotpatch.md) | prepared sites, native patch protocol, and relay ownership |
+| [`docs/hardening.md`](docs/hardening.md) | execution domains, trampoline lifetime, rollback, and recovery |
+| [`examples/api_monitor.cpp`](examples/api_monitor.cpp) | runnable winapi and native function examples |
 
 ## license
 
-released under the [mit license](LICENSE).
+shadowhook is released under the [mit license](LICENSE).
 
 <div align="center">
-  <img src="assets/readme/footer.svg" width="940" alt="shadowhook — research, instrument, understand" />
+
+<img src="assets/readme/footer.svg" width="940" alt="shadowhook — research, instrument, understand" />
+
 </div>
