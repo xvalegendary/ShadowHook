@@ -54,7 +54,10 @@ namespace shadowhook::memory {
         MEMORY_BASIC_INFORMATION m{};
         if (VirtualQuery(page.address, &m, sizeof(m)) == sizeof(m)) page.current = m.Protect;
         else { page.current = 0; if (!page.error) page.error = GetLastError(); }
-        return ok && page.current == protection;
+        const bool writable_equivalent =
+            (protection==PAGE_EXECUTE_READWRITE && page.current==PAGE_EXECUTE_WRITECOPY) ||
+            (protection==PAGE_READWRITE && page.current==PAGE_WRITECOPY);
+        return ok && (page.current == protection || writable_equivalent);
     }
     bool make_writable(std::vector<page_protection>& pages, const patch_api& api) {
         for (auto& page : pages)

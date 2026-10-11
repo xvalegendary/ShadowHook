@@ -18,9 +18,10 @@
 
 > [!IMPORTANT]
 > **Hardening API update:** sh_init() supplies a cooperative execution domain.
-> Every full target/original call must use shadowhook::enter_inline_execution(). Unwind-sensitive prologues
-> are rejected. Raw originals are retained for process lifetime; leases reclaim storage
-> after the last owner releases it. See [migration and contracts](docs/hardening.md).
+> Every full inline target/original call must use shadowhook::enter_inline_execution().
+> Eligible V1 flags=0 unwind prologues have registered relocated metadata; unsupported
+> formats fail closed. Published original code is retained for process lifetime.
+> See [current runtime contracts](docs/runtime-backends.md).
 > The API monitor now uses atomic IAT slot exchange.
 
 ## overview
@@ -97,7 +98,7 @@ target_link_libraries(my_app PRIVATE shadowhook)
 ### inline hook · cooperative execution
 
 sh_init() registers inline_hook with its own shared execution domain. An eligible
-leaf target can be installed through the normal API; every call path still needs
+leaf or supported unwind-covered target can be installed through the normal API; every call path still needs
 to enter the backend's domain BEFORE executing target/original code.
 
 ~~~cpp
@@ -128,6 +129,10 @@ demonstrates the default inline path on a controlled leaf function.
 CMake builds no tests: CTest registration and all test/probe targets are removed.
 Existing test source files are retained without being compiled.
 
+### native hotpatch mode
+
+For unguarded callers at explicitly prepared x64 sites, use hook_type::hotpatch. It atomically switches an aligned two-byte NOP entry through an immutable relay; unsupported layouts are rejected. This is not a generic arbitrary-prologue patcher. See [required site contract and process-lifetime retention](docs/hotpatch.md). Run api_monitor --hotpatch-demo for the manual concurrent example.
+
 ### api reference
 
 | call | purpose |
@@ -150,21 +155,22 @@ Existing test source files are retained without being compiled.
 | `inline_hook` | experimental | patches a function entry and creates a trampoline; relocation and thread-safety caveats apply |
 | `iat_shadow` | experimental | rewrites the matching iat slot of the main executable, not every loaded module |
 | `vtable` | limited | currently replaces the first vtable entry; this changes the shared table, not an instance-private clone |
-| `exception_veh` | experimental | plants an `int3` and redirects via vectored exception handling; rearming is incomplete |
-| `page_shadow` | incomplete | allocates a copied page and plants `int3`, but does not implement a complete shadow-page execution route |
-| `dll_hollow` | experimental / naming caveat | currently performs an iat-slot replacement, not general-purpose dll hollowing |
+| `exception_veh` | experimental | persistent breakpoint dispatch with retained original trampoline; no single-step rearm |
+| `page_shadow` | experimental | persistent breakpoint routes into an RX shadow dispatch island; not PTE remapping |
+| `dll_hollow` | restricted owned-image mode | fully replaces an eligible private DLL image at the same base; typed image API, original snapshot and restore |
+| `hotpatch` | prepared sites only | atomic aligned entry switch; immutable relay and original body |
 | `ept` | placeholder | returns `unsupported`; no hypervisor integration |
 | `ssdt_shadow` | placeholder | returns `unsupported`; no kernel driver integration |
 
-there are **eight backend registrations** in `src/shadowhook.cpp`. its current startup log hardcodes “7 backends registered”; that text is not an accurate count.
+Registration depends on SHADOWHOOK_EXPERIMENTAL. EPT/SSDT remain stubs; their registration is not implementation.
 
 ## limitations
 
 - **architecture:** code paths assume windows x64 (`rip`, `image_nt_headers64`, and x64 jump stubs). other architectures are not established as supported.
-- **instruction rewriting:** the inline trampoline does not provide a general-purpose relocator for rip-relative instructions or relative branches.
+- **instruction rewriting:** RIP-relative operands, relative calls/jumps and Jcc are relocated for the decoded subset; unknown encodings and unsupported unwind formats are rejected.
 - **execution safety:** patches, executable memory permissions, and hook removal need a robust concurrency and in-flight-call strategy before production use.
 - **backend semantics:** registered backends vary substantially in completeness. directory names are not privilege boundaries.
-- **cleanup reporting:** `sh_unhook_all()` / shutdown visit placeholder backends; their `unsupported` results can produce an aggregate `partial` status even when no ept/ssdt hook was installed.
+- **cleanup reporting:** shutdown skips inactive backends; partial rollback retains runtime state and reports failure.
 - **language boundary:** despite `extern "C"` linkage, the public header exposes a c++ enum parameter and is therefore a **c++ api** as currently declared.
 - **validation:** this readme documents the current implementation; it does not imply a successful windows build or runtime test on every target build.
 

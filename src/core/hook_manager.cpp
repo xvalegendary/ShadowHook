@@ -1,6 +1,7 @@
 #include "shadowhook/core/hook_manager.hpp"
 #include "shadowhook/utils/logger.hpp"
 #include "shadowhook/ring3/inline_hook.hpp"
+#include "shadowhook/ring3/hotpatch_hook.hpp"
 
 namespace shadowhook {
 hook_manager& hook_manager::instance() {
@@ -30,6 +31,8 @@ hook_status hook_manager::install(hook_type type, void* target, void* detour, vo
     if (original) *original = nullptr;
     if (!target || !detour) return hook_status::invalid_address;
     std::lock_guard<std::mutex> lock(mutex_);
+    if (type != hook_type::hotpatch && ring3::hotpatch_hook::reserves_address(target))
+        return hook_status::already_hooked;
     const auto it = backends_.find(type);
     if (it == backends_.end()) return hook_status::unsupported;
     auto backend = it->second;
@@ -92,8 +95,6 @@ std::shared_ptr<threading::execution_domain> hook_manager::inline_execution_doma
     return backend ? backend->execution_domain() : nullptr;
 }
 threading::execution_scope hook_manager::enter_inline_execution() const {
-    // Release registry/backend locks before waiting for admission. Executing
-    // detours may need the registry lock to obtain their original lease.
     auto domain = inline_execution_domain();
     return domain ? domain->enter() : threading::execution_scope{};
 }

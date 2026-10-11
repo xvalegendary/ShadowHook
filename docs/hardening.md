@@ -188,3 +188,12 @@ execution admission so detours can obtain original leases without lock inversion
 - [RtlLookupFunctionEntry](https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-rtllookupfunctionentry)
 - [Intel architecture manuals and instruction reference](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
 
+
+## Prepared native hotpatch sites
+
+For unguarded callers, hook_type::hotpatch supplies a separate native slot-switching path. It accepts only the prepared 66 90 entry/padding contract and has no unsafe fallback. Cooperative inline semantics are unchanged. See [native mode, lifetime and recovery](hotpatch.md).
+## Runtime backend update
+See [runtime-backends.md](runtime-backends.md) for the current relocation/unwind,
+breakpoint lifetime and full owned-image replacement contracts. Old statements
+that all unwind-covered prologues are rejected or that dll_hollow aliases IAT
+are superseded by that document. Native hotpatch remains prepared-site only.

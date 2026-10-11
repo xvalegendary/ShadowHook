@@ -43,6 +43,7 @@ private:
         std::shared_ptr<std::atomic<bool>> reclaim;
         std::vector<std::uint8_t> saved;
         std::vector<std::uint8_t> patch;
+        std::vector<std::uint8_t> observed;
         std::vector<memory::page_protection> pages;
         patch_state state{patch_state::prepared};
         bool patch_installed{};

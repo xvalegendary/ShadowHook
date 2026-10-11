@@ -29,6 +29,7 @@ namespace shadowhook::asm_stubs {
     enum class branch_kind : std::uint8_t { none, call, jump, conditional };
     struct insn_info {
         std::size_t length{};
+        bool terminates{};
         bool is_relative{};
         std::size_t rel_offset{};
         std::size_t rel_size{};

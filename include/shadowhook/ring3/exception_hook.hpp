@@ -1,38 +1,20 @@
-﻿#pragma once
+#pragma once
 #include "shadowhook/core/hook_base.hpp"
-#include <unordered_map>
-
+#include "shadowhook/ring3/breakpoint_dispatch.hpp"
 namespace shadowhook::ring3 {
-
-    class exception_hook : public hook_base {
-    public:
-        exception_hook();
-        ~exception_hook() override;
-
-        hook_status install(void* target, void* detour, void** original) override;
-        hook_status uninstall(void* target) override;
-        hook_status uninstall_all() override;
-        bool is_hooked(void* target) const override;
-        hook_type type() const override { return hook_type::exception_veh; }
-        const char* name() const override { return "exception_veh"; }
-
-    private:
-        struct veh_entry : entry {
-            void* target_page;
-            uint32_t page_offset;
-        };
-
-        std::unordered_map<void*, veh_entry> veh_hooks_;
-        void* veh_handle_;
-
-        static LONG NTAPI veh_handler(PEXCEPTION_POINTERS ep);
-
-        void* get_page_base(void* addr) const {
-            return (void*)((uintptr_t)addr & ~0xFFFULL);
-        }
-
-        bool make_page_guard(void* page);
-        bool clear_page_guard(void* page);
-    };
-
-} // namespace shadowhook::ring3
+class exception_hook final : public hook_base {
+public:
+    exception_hook():dispatch_(false) {}
+    ~exception_hook() override=default;
+    hook_status install(void* t,void* d,void** o) override {return dispatch_.install(t,d,o);}
+    hook_status uninstall(void* t) override {return dispatch_.uninstall(t);}
+    hook_status uninstall_all() override {return dispatch_.uninstall_all();}
+    bool is_hooked(void* t) const override {return dispatch_.is_hooked(t);}
+    std::size_t active_count() const override {return dispatch_.active_count();}
+    hook_type type() const override {return hook_type::exception_veh;}
+    const char* name() const override {return "exception_veh";}
+    hook_status recover(void* t) {return dispatch_.uninstall(t);}
+private:
+    ring3::breakpoint_dispatch dispatch_;
+};
+}

@@ -143,7 +143,7 @@ namespace shadowhook::asm_stubs {
             if (op2 == 0x1F || (op2 >= 0x40 && op2 <= 0x4F) ||
                 (op2 >= 0x90 && op2 <= 0x9F) ||
                 op2 == 0x10 || op2 == 0x11 || op2 == 0x28 || op2 == 0x29 ||
-                op2 == 0x2E || op2 == 0x2F || op2 == 0x6F || op2 == 0x7F ||
+                op2 == 0x2E || op2 == 0x2F || op2==0x58 || op2==0x59 || op2==0x5C || op2==0x5E || op2==0x57 || op2 == 0x6F || op2 == 0x7F ||
                 op2 == 0xAF || op2 == 0xB0 || op2 == 0xB1 ||
                 op2 == 0xB6 || op2 == 0xB7 || op2 == 0xBE || op2 == 0xBF ||
                 op2 == 0xBA || op2 == 0x70 || op2 == 0x71 ||
@@ -208,7 +208,7 @@ namespace shadowhook::asm_stubs {
         else {
             return fail; // unknown
         }
-        if (has_rep && !((op == 0x90) || (two_byte && (op2 == 0x10 || op2 == 0x11 || op2 == 0x6F || op2 == 0x7F)))) return fail;
+        if (has_rep && !((op == 0x90) || (two_byte && (op2 == 0x10 || op2 == 0x11 || op2 == 0x6F || op2 == 0x7F || op2==0x58 || op2==0x59 || op2==0x5C || op2==0x5E)))) return fail;
         if (modrm) {
             if (two_byte && (op2 == 0x6F || op2 == 0x7F) && rep == 0xF2) return fail;
             if (has_rep && operand16) return fail; 
@@ -238,6 +238,14 @@ namespace shadowhook::asm_stubs {
             if ((group_f6 || group_f7) && r.reg == 0)
                 imm_size = group_f6 ? 1 : (operand16 && !rex_w ? 2 : 4);
             if ((group_f6 || group_f7) && r.reg == 1) return fail;
+        }
+        result.terminates = (!two_byte && (op==0xC2 || op==0xC3 || op==0xCC));
+        if (!two_byte && op==0xFF) {
+            std::size_t modrm_pos=0;
+            while(modrm_pos<limit && is_legacy_prefix(code[modrm_pos]))++modrm_pos;
+            while(modrm_pos<limit && (code[modrm_pos]&0xF0)==0x40)++modrm_pos;
+            ++modrm_pos;
+            if(modrm_pos<limit && ((code[modrm_pos]>>3)&7)==4)result.terminates=true;
         }
         if (!consume(pos, imm_size, limit)) return fail;
         result.length = pos;

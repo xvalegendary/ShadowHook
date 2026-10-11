@@ -12,6 +12,7 @@ set(SHADOWHOOK_SOURCES
     src/ring3/vtable_hook.cpp src/ring3/exception_hook.cpp src/ring3/dll_hollow.cpp src/ring3/inline_hook.cpp
     src/utils/pattern_scan.cpp src/utils/logger.cpp src/utils/memory.cpp
     src/utils/asm_stubs.cpp src/utils/asm_stubs.asm src/utils/thread_quiescence.cpp src/shadowhook.cpp)
+list(APPEND SHADOWHOOK_SOURCES src/ring3/hotpatch_hook.cpp src/ring3/relocated_prologue.cpp src/ring3/breakpoint_dispatch.cpp)
 add_library(shadowhook STATIC ${SHADOWHOOK_SOURCES})
 target_compile_features(shadowhook PUBLIC cxx_std_17)
 target_compile_options(shadowhook PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4>

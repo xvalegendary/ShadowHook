@@ -24,7 +24,8 @@ enum class hook_type : std::uint8_t {
     vtable = 0x05,
     exception_veh = 0x06,
     dll_hollow = 0x07,
-    inline_hook = 0x08
+    inline_hook = 0x08,
+    hotpatch = 0x09
 };
 
 enum class hook_scope_type : std::uint8_t {
@@ -71,6 +72,7 @@ inline const char* type_str(hook_type t) noexcept {
     case hook_type::exception_veh: return "exception_veh";
     case hook_type::dll_hollow: return "dll_hollow";
     case hook_type::inline_hook: return "inline_hook";
+    case hook_type::hotpatch: return "hotpatch";
     default: return "unknown";
     }
 }

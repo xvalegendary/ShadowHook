@@ -1,5 +1,7 @@
 #include "shadowhook/ring3/inline_hook.hpp"
 #include "shadowhook/utils/asm_stubs.hpp"
+#include "shadowhook/ring3/relocated_prologue.hpp"
+#include "shadowhook/ring3/hotpatch_hook.hpp"
 #include "shadowhook/utils/logger.hpp"
 #include <algorithm>
 #include <array>
@@ -9,56 +11,18 @@
 
 namespace shadowhook::ring3 {
 namespace {
-struct instruction {
-    std::size_t old_offset{}, new_offset{}, emitted_size{};
-    asm_stubs::insn_info info{};
-    std::uintptr_t destination{};
-};
-std::size_t output_size(const asm_stubs::insn_info& info) {
-    switch (info.branch) {
-    case asm_stubs::branch_kind::jump: return 14;
-    case asm_stubs::branch_kind::call: return 16;
-    case asm_stubs::branch_kind::conditional: return 16;
-    default: return info.length;
-    }
+bool pin_image_code(void* address) {
+    MEMORY_BASIC_INFORMATION info{};
+    if(VirtualQuery(address,&info,sizeof(info))!=sizeof(info))return false;
+    if(info.Type!=MEM_IMAGE)return true;
+    HMODULE module{};
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
+                             reinterpret_cast<LPCWSTR>(address),&module)!=0;
 }
-bool volatile_register(unsigned reg) {
-    return reg == 0 || reg == 1 || reg == 2 || (reg >= 8 && reg <= 11);
 }
-
-bool leaf_instruction(const std::uint8_t* bytes, const asm_stubs::insn_info& info) {
-    if (info.branch == asm_stubs::branch_kind::call) return false;
-    if (info.branch != asm_stubs::branch_kind::none) return true;
-    std::size_t pos{};
-    while (pos < info.length && bytes[pos] == 0x66) ++pos;
-    unsigned rex{};
-    if (pos < info.length && (bytes[pos] & 0xf0) == 0x40) rex = bytes[pos++];
-    if (pos >= info.length) return false;
-    const auto op = bytes[pos++];
-    if (op == 0x90 || op == 0xC3 || op == 0xCC) return true;
-    if (op >= 0xB8 && op <= 0xBF) return volatile_register((op - 0xB8) + ((rex & 1) ? 8 : 0));
-    if (op == 0x0F) return pos < info.length && bytes[pos] == 0x1F;
-    if (pos >= info.length) return false;
-    const auto m = bytes[pos];
-    const auto reg = ((m >> 3) & 7) + ((rex & 4) ? 8 : 0);
-    const auto rm = (m & 7) + ((rex & 1) ? 8 : 0);
-    const bool register_operand = (m >> 6) == 3;
-    if (op == 0x8B || op == 0x8D || op == 0x63) return volatile_register(reg);
-    if (op == 0x89) return register_operand && volatile_register(rm);
-    if (op == 0x85 || op == 0x84 || op == 0x39 || op == 0x3B) return true;
-    if (op == 0x31 || op == 0x33 || op == 0x01 || op == 0x03 || op == 0x29 || op == 0x2B)
-        return (op & 2) ? volatile_register(reg) : register_operand && volatile_register(rm);
-    if (op == 0x81 || op == 0x83)
-        return ((m >> 3) & 7) == 7 || (register_operand && volatile_register(rm));
-    if (op == 0xC7) return register_operand && volatile_register(rm);
-    if (op == 0xFF) return ((m >> 3) & 7) == 4; 
-    return false;
-}
-} // namespace
-
 inline_hook::inline_hook(std::shared_ptr<threading::execution_domain> d, memory::patch_api api)
     : runtime_(std::make_unique<runtime>()) {
-    runtime_->domain = std::move(d);
+    runtime_->domain = d?std::move(d):std::make_shared<threading::execution_domain>();
     runtime_->api = api;
     if (!api.protect || !api.flush) throw std::invalid_argument("patch_api requires both functions");
     if (runtime_->domain && !runtime_->domain->bind(runtime_.get()))
@@ -121,6 +85,12 @@ bool inline_hook::is_hooked(void* target) const {
 }
 hook_status inline_hook::apply(inline_entry& e, bool patched) {
     const auto prior = e.state;
+    auto& current=e.observed;
+    if(!memory::safe_copy(current.data(),e.target,current.size()))return hook_status::invalid_address;
+    if(e.bytes_known && current != (e.patch_installed?e.patch:e.saved)) {
+        e.state=patch_state::failed;
+        return hook_status::partial;
+    }
     e.state = patched ? patch_state::prepared : patch_state::restoring;
     if (!memory::make_writable(e.pages, runtime_->api)) {
         const bool restored = memory::restore_pages(e.pages, runtime_->api);
@@ -151,128 +121,29 @@ hook_status inline_hook::install(void* target, void* detour, void** original) tr
     if (!healthy_locked()) return hook_status::partial;
     if (!target || !detour || target == detour) return hook_status::invalid_address;
     if (rt.entries.count(target)) return hook_status::already_hooked;
-    if (!memory::is_executable(target)) return hook_status::invalid_address;
+    if (!memory::is_executable(target) || !memory::is_executable(detour) ||
+        !pin_image_code(target) || !pin_image_code(detour)) return hook_status::invalid_address;
 
-    DWORD64 image_base{};
-    if (RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(target), &image_base, nullptr))
-        return hook_status::unsupported; 
-    const auto* source = static_cast<const std::uint8_t*>(target);
-    const auto source_start = reinterpret_cast<std::uintptr_t>(target);
-    std::vector<instruction> steps;
-    std::size_t patch_size = 0, output_length = 0;
-    while (patch_size < sizeof(asm_stubs::jmp_abs)) {
-        const auto current = source_start + patch_size;
-        const auto* addr = source + patch_size;
-        std::size_t accessible{};
-        while (accessible < 15 && memory::readable_range(addr + accessible, 1)) ++accessible;
-        std::array<std::uint8_t, 15> scratch{};
-        if (!accessible || !memory::safe_copy(scratch.data(), addr, accessible))
-            return hook_status::invalid_address;
-        const auto info = asm_stubs::decode(scratch.data(), accessible);
-        if (!info.length || !leaf_instruction(scratch.data(), info))
-            return hook_status::unsupported;
-        DWORD64 instruction_base{};
-        if (RtlLookupFunctionEntry(current, &instruction_base, nullptr))
-            return hook_status::unsupported;
 
-        instruction item{};
-        item.old_offset = patch_size;
-        item.new_offset = output_length;
-        item.emitted_size = output_size(info);
-        item.info = info;
-        if (info.is_relative) {
-            std::int64_t relative = 0;
-            if (info.rel_size == 1) {
-                std::int8_t value{};
-                std::memcpy(&value, addr + info.rel_offset, 1);
-                relative = value;
-            } else if (info.rel_size == 4) {
-                std::int32_t value{};
-                std::memcpy(&value, addr + info.rel_offset, 4);
-                relative = value;
-            } else return hook_status::unsupported;
-            const auto base_after = static_cast<std::int64_t>(current + info.length);
-            item.destination = static_cast<std::uintptr_t>(base_after + relative);
-        }
-        steps.push_back(item);
-        patch_size += info.length;
-        output_length += item.emitted_size;
-        if (patch_size > 256 || output_length > 2048) return hook_status::unsupported;
-    }
-    const auto detour_address = reinterpret_cast<std::uintptr_t>(detour);
-    if (detour_address >= source_start && detour_address - source_start < patch_size)
+    relocated_prologue relocated;
+    const auto prepared=prepare_prologue(target,5,relocated,detour);
+    if(prepared!=hook_status::success)return prepared;
+    const auto patch_size=relocated.saved.size();
+    if(hotpatch_hook::reserves_range(target,patch_size))return hook_status::already_hooked;
+    const auto source_start=reinterpret_cast<std::uintptr_t>(target);
+    const auto detour_address=reinterpret_cast<std::uintptr_t>(detour);
+    if(detour_address>=source_start && detour_address-source_start<patch_size)
         return hook_status::invalid_address;
-    for (const auto& kv : rt.entries) {
-        const auto existing = reinterpret_cast<std::uintptr_t>(kv.first);
-        if (source_start < existing + kv.second->saved.size() && existing < source_start + patch_size)
+    for(const auto& kv:rt.entries) {
+        const auto existing=reinterpret_cast<std::uintptr_t>(kv.first);
+        if(source_start<existing+kv.second->saved.size() && existing<source_start+patch_size)
             return hook_status::already_hooked;
     }
-    for (const auto& step : steps) {
-        if (!step.info.is_relative) continue;
-        if (step.destination >= source_start && step.destination - source_start < patch_size) {
-            const auto offset = step.destination - source_start;
-            if (std::none_of(steps.begin(), steps.end(),
-                             [offset](const auto& x) { return x.old_offset == offset; }))
-                return hook_status::unsupported;
-        }
-    }
-
-    void* trampoline = memory::allocate_rwx_near(target, output_length + 14);
-    if (!trampoline) return hook_status::alloc_failed;
-    auto owned = std::unique_ptr<void, decltype(&memory::free_rwx)>(trampoline, &memory::free_rwx);
-    auto* destination = static_cast<std::uint8_t*>(trampoline);
-    const auto relocated_start = reinterpret_cast<std::uintptr_t>(trampoline);
-
-    for (const auto& step : steps) {
-        const auto* from = source + step.old_offset;
-        auto* to = destination + step.new_offset;
-        const auto& info = step.info;
-        if (info.is_relative) {
-            auto branch_target = step.destination;
-            if (branch_target >= source_start && branch_target - source_start < patch_size) {
-                const auto offset = branch_target - source_start;
-                const auto it = std::find_if(steps.begin(), steps.end(),
-                    [offset](const auto& x) { return x.old_offset == offset; });
-                branch_target = relocated_start + it->new_offset;
-            }
-            if (info.branch == asm_stubs::branch_kind::jump) {
-                asm_stubs::write_jmp_abs(to, reinterpret_cast<void*>(branch_target));
-            } else if (info.branch == asm_stubs::branch_kind::call) {
-                asm_stubs::write_call_abs_safe(to, reinterpret_cast<void*>(branch_target));
-            } else if (info.branch == asm_stubs::branch_kind::conditional) {
-                to[0] = static_cast<std::uint8_t>(0x70 | (info.condition ^ 1));
-                to[1] = 14;
-                asm_stubs::write_jmp_abs(to + 2, reinterpret_cast<void*>(branch_target));
-            } else return hook_status::unsupported;
-        } else {
-            std::memcpy(to, from, info.length);
-            if (info.is_rip_relative) {
-                std::int32_t old_disp{};
-                std::memcpy(&old_disp, from + info.rip_disp_offset, 4);
-                const auto absolute = static_cast<std::int64_t>(source_start + step.old_offset + info.length) + old_disp;
-
-                if (absolute >= static_cast<std::int64_t>(source_start) &&
-                    absolute < static_cast<std::int64_t>(source_start + patch_size))
-                    return hook_status::unsupported;
-                const auto next_new = static_cast<std::int64_t>(relocated_start + step.new_offset + info.length);
-                const auto new_disp = absolute - next_new;
-                if (new_disp < INT32_MIN || new_disp > INT32_MAX) return hook_status::unsupported;
-                const auto rel32 = static_cast<std::int32_t>(new_disp);
-                std::memcpy(to + info.rip_disp_offset, &rel32, 4);
-            }
-        }
-    }
-    asm_stubs::write_jmp_abs(destination + output_length, source + patch_size);
-    DWORD trampoline_previous{};
-    if (!memory::protect(trampoline, output_length + 14, PAGE_EXECUTE_READ, &trampoline_previous))
-        return hook_status::protect_failed;
-    if (!FlushInstructionCache(GetCurrentProcess(), trampoline, output_length + 14))
-        return hook_status::protect_failed;
-
+    void* trampoline=relocated.entry;
     auto reclaim = std::make_shared<std::atomic<bool>>(true);
-    auto* transferred = owned.release();
-    std::shared_ptr<void> owner(transferred, [reclaim](void* p) noexcept {
-        if (reclaim->load(std::memory_order_relaxed)) memory::free_rwx(p);
+    auto* backing=new std::shared_ptr<void>(std::move(relocated.owner));
+    std::shared_ptr<void> owner(trampoline,[reclaim,backing](void*) noexcept {
+        if(reclaim->load(std::memory_order_relaxed))delete backing;
     });
     auto record = std::make_unique<inline_entry>();
     record->target = target;
@@ -282,11 +153,21 @@ hook_status inline_hook::install(void* target, void* detour, void** original) tr
     record->saved.resize(patch_size);
     if (!memory::safe_copy(record->saved.data(), target, patch_size) ||
         !memory::capture_pages(target, patch_size, record->pages)) return hook_status::invalid_address;
+    record->observed.resize(patch_size);
     record->patch.resize(patch_size, 0x90);
-    asm_stubs::write_jmp_abs(record->patch.data(), detour);
+    record->patch[0]=0xE9;
+    const auto distance=reinterpret_cast<std::intptr_t>(relocated.redirect)-
+                        reinterpret_cast<std::intptr_t>(target)-5;
+    if(distance<INT32_MIN || distance>INT32_MAX)return hook_status::unsupported;
+    const auto displacement=static_cast<std::int32_t>(distance);
+    std::memcpy(record->patch.data()+1,&displacement,4);
     auto& e = *record;
     rt.entries.emplace(target, std::move(record)); 
     const auto result = apply(e, true);
+    if (result == hook_status::busy) {
+        rt.entries.erase(target);
+        return result;
+    }
     if (result != hook_status::success) {
         const auto rollback = apply(e, false);
         if (rollback == hook_status::success) {
@@ -322,7 +203,8 @@ hook_status inline_hook::uninstall(void* target) {
         transaction.healthy(healthy_locked());
         return result;
     }
-    if (e.raw_published) ++rt.retired;
+    e.reclaim->store(false,std::memory_order_relaxed);
+    ++rt.retired;
     rt.entries.erase(it); 
     transaction.healthy(healthy_locked());
     return hook_status::success;

@@ -175,7 +175,6 @@ int run_inline_demo() {
 
     const auto shutdown = static_cast<shadowhook::hook_status>(sh_shutdown_checked());
     if (shutdown != shadowhook::hook_status::success || sh_is_hooked(target)) {
-        // A retained patch/recovery record still refers to this target allocation.
         (void)owner.release();
         SH_LOG_ERROR("Inline demo shutdown failed; target allocation retained");
         return 6;
@@ -183,15 +182,217 @@ int run_inline_demo() {
     SH_LOG_INFO("Default inline demo | %s, shutdown=%s", passed ? "PASS" : "FAIL", shadowhook::status_str(shutdown));
     return passed ? 0 : 6;
 }
+using hotpatch = shadowhook::ring3::hotpatch_hook;
+using hotpatch_state = shadowhook::ring3::hotpatch_state;
+using native_function = int(*)();
+using native_owner = std::unique_ptr<void,decltype(&shadowhook::memory::free_rwx)>;
+std::atomic<std::uintptr_t> fault_site{};
+std::atomic<bool> fault_restore{},fault_cache{};
+
+BOOL WINAPI native_protect(LPVOID address,SIZE_T size,DWORD protection,PDWORD previous) {
+    if(fault_restore.load() && protection==PAGE_EXECUTE_READ) {
+        SetLastError(ERROR_ACCESS_DENIED);return FALSE;
+    }
+    return VirtualProtect(address,size,protection,previous);
+}
+BOOL WINAPI native_flush(HANDLE process,LPCVOID address,SIZE_T size) {
+    const auto point=reinterpret_cast<std::uintptr_t>(address);
+    const auto target=fault_site.load();
+    if(fault_cache.load() && target && point>=target-5 && point<=target+2) {
+        SetLastError(ERROR_ACCESS_DENIED);return FALSE;
+    }
+    return FlushInstructionCache(process,address,size);
+}
+native_owner prepared_native_page(std::size_t pages,void*& target,bool cross_page=false) {
+    SYSTEM_INFO info{};GetSystemInfo(&info);
+    native_owner owner(shadowhook::memory::allocate_rwx(info.dwPageSize*pages),&shadowhook::memory::free_rwx);
+    if(!owner) return owner;
+    auto* bytes=static_cast<std::uint8_t*>(owner.get());
+    auto* entry=bytes+(cross_page ? info.dwPageSize+2 : 16);
+    std::memset(entry-5,0xCC,5);
+    const std::uint8_t body[]={0x66,0x90,0xB8,7,0,0,0,0xC3};
+    std::memcpy(entry,body,sizeof(body));
+    DWORD previous{};
+    if(!VirtualProtect(bytes,info.dwPageSize*pages,PAGE_EXECUTE_READ,&previous) ||
+       !FlushInstructionCache(GetCurrentProcess(),bytes,info.dwPageSize*pages)) return native_owner(nullptr,&shadowhook::memory::free_rwx);
+    if(cross_page && !VirtualProtect(bytes+info.dwPageSize,info.dwPageSize,PAGE_EXECUTE_READWRITE,&previous))
+        return native_owner(nullptr,&shadowhook::memory::free_rwx);
+    target=entry;return owner;
+}
+DWORD native_rights(void* address) {
+    MEMORY_BASIC_INFORMATION value{};
+    return VirtualQuery(address,&value,sizeof(value))==sizeof(value) ? value.Protect : 0;
+}
+int run_hotpatch_demo() {
+    sh_init();
+    auto& manager=shadowhook::hook_manager::instance();
+    void* target{};
+    auto owner=prepared_native_page(1,target);
+    if(!owner) return 7;
+    const auto fn=reinterpret_cast<native_function>(target);
+    const auto detour=reinterpret_cast<void*>(&inline_demo_detour);
+    bool passed=fn()==7;
+    const auto status=static_cast<shadowhook::hook_status>(sh_hook(
+        shadowhook::hook_type::hotpatch,target,detour,nullptr));
+    passed=passed && status==shadowhook::hook_status::success && fn()==8;
+    auto backend=std::dynamic_pointer_cast<hotpatch>(manager.get_backend(shadowhook::hook_type::hotpatch));
+    shadowhook::ring3::hotpatch_report report;
+    passed=passed && backend && backend->inspect(target,report);
+    auto original=passed ? reinterpret_cast<native_function>(report.original) : nullptr;
+    passed=passed && original && original()==7;
+    auto* relay=report.relay;
+    std::array<std::uint8_t,6> body{};
+    shadowhook::memory::safe_copy(body.data(),static_cast<std::uint8_t*>(target)+2,6);
+    passed=passed && sh_unhook(target)==0 && fn()==7 && original()==7;
+    passed=passed && reinterpret_cast<native_function>(static_cast<std::uint8_t*>(target)-5)()==7;
+    const auto conflict=static_cast<shadowhook::hook_status>(sh_hook(
+        shadowhook::hook_type::inline_hook,target,detour,nullptr));
+    passed=passed && conflict==shadowhook::hook_status::already_hooked;
+    passed=passed && backend->install(target,detour,nullptr)==shadowhook::hook_status::success;
+    shadowhook::ring3::hotpatch_report next;
+    passed=passed && backend->inspect(target,next) && next.relay==relay;
+    passed=passed && backend->uninstall(target)==shadowhook::hook_status::success;
+
+    std::atomic<bool> stop{},bad_value{};
+    std::atomic<unsigned> calls{};
+    std::vector<std::thread> workers;
+    for(int i=0;i<4;++i) workers.emplace_back([&] {
+        while(!stop.load()) {
+            const auto value=fn();
+            if(value!=7 && value!=8) bad_value=true;
+            ++calls;
+        }
+    });
+    std::thread new_threads([&] {
+        for(int i=0;i<100 && !stop.load();++i) {
+            std::thread fresh([&] {
+                for(int n=0;n<1000;++n) {
+                    const auto value=fn();
+                    if(value!=7 && value!=8) bad_value=true;
+                    ++calls;
+                }
+            });
+            fresh.join();
+        }
+    });
+    for(int i=0;i<1000 && passed;++i) {
+        passed=backend->install(target,detour,nullptr)==shadowhook::hook_status::success &&
+               backend->uninstall(target)==shadowhook::hook_status::success;
+    }
+    stop=true;
+    for(auto& worker:workers) worker.join();
+    new_threads.join();
+    passed=passed && !bad_value.load() && calls.load()>0 &&
+           manager.inline_execution_domain()->active_calls()==0 &&
+           std::memcmp(static_cast<std::uint8_t*>(target)+2,body.data(),6)==0 &&
+           native_rights(target)==PAGE_EXECUTE_READ;
+    SH_LOG_INFO("Native hotpatch | unguarded calls=%u, cycles=1000, original=7, relay reused=%s",
+                calls.load(),next.relay==relay ? "yes":"no");
+    if(hotpatch::reserves_address(target)) (void)owner.release(); 
+
+    void* unsupported{};
+    auto rejected=prepared_native_page(1,unsupported);
+    if(!rejected) return 7;
+    DWORD old{};
+    VirtualProtect(unsupported,8,PAGE_EXECUTE_READWRITE,&old);
+    auto* bytes=static_cast<std::uint8_t*>(unsupported);
+    bytes[0]=0x90;bytes[1]=0x90; 
+    VirtualProtect(unsupported,8,old,&old);
+    std::array<std::uint8_t,8> unchanged{};
+    shadowhook::memory::safe_copy(unchanged.data(),unsupported,8);
+    passed=passed && backend->install(unsupported,detour,nullptr)==shadowhook::hook_status::unsupported &&
+           std::memcmp(unsupported,unchanged.data(),8)==0;
+    passed=passed && backend->install(bytes+1,detour,nullptr)==shadowhook::hook_status::invalid_address;
+    SH_LOG_INFO("Native layout rejection | two NOPs and unaligned entry unchanged");
+
+   
+    void* split{};
+    auto split_owner=prepared_native_page(2,split,true);
+    if(!split_owner) return 7;
+    hotpatch faults({&native_protect,&native_flush});
+    passed=passed && faults.install(split,detour,nullptr)==shadowhook::hook_status::success;
+    passed=passed && native_rights(static_cast<std::uint8_t*>(split)-5)==PAGE_EXECUTE_READ &&
+                    native_rights(split)==PAGE_EXECUTE_READWRITE;
+    fault_site=reinterpret_cast<std::uintptr_t>(split);
+    fault_cache=true;
+    passed=passed && faults.uninstall(split)==shadowhook::hook_status::partial;
+    fault_cache=false;
+    shadowhook::ring3::hotpatch_report failed;
+    passed=passed && faults.inspect(split,failed) && failed.state==hotpatch_state::failed &&
+                    !failed.entry_enabled && reinterpret_cast<native_function>(split)()==7;
+    passed=passed && faults.recover(split)==shadowhook::hook_status::success;
+    fault_restore=true;
+    passed=passed && faults.install(split,detour,nullptr)==shadowhook::hook_status::partial;
+    fault_restore=false;
+    passed=passed && faults.recover(split)==shadowhook::hook_status::success &&
+                    native_rights(static_cast<std::uint8_t*>(split)-5)==PAGE_EXECUTE_READ;
+    passed=passed && faults.install(split,detour,nullptr)==shadowhook::hook_status::success;
+    InterlockedExchange16(reinterpret_cast<volatile SHORT*>(split),static_cast<SHORT>(0x9090));
+    passed=passed && faults.uninstall(split)==shadowhook::hook_status::partial;
+    std::uint16_t foreign{};
+    shadowhook::memory::safe_copy(&foreign,split,2);
+    passed=passed && foreign==0x9090; 
+    InterlockedExchange16(reinterpret_cast<volatile SHORT*>(split),static_cast<SHORT>(0x9066));
+    passed=passed && faults.recover(split)==shadowhook::hook_status::success;
+    SH_LOG_INFO("Native recovery | cross-page rights, cache/protection faults and foreign entry preserved");
+    if(hotpatch::reserves_address(split)) (void)split_owner.release();
+
+
+    void* transient{};
+    auto transient_owner=prepared_native_page(1,transient);
+    if(!transient_owner) return 7;
+    auto local=std::make_unique<hotpatch>();
+    void* raw_original{};
+    passed=passed && local->install(transient,detour,&raw_original)==shadowhook::hook_status::success;
+    const auto transient_fn=reinterpret_cast<native_function>(transient);
+    std::atomic<bool> finish{},bad{};
+    std::atomic<unsigned> activity{};
+    std::thread active([&]{
+        while(!finish.load()) {
+            const auto value=transient_fn();
+            if(value!=7 && value!=8) bad=true;
+            ++activity;
+        }
+    });
+    while(activity.load()<100) std::this_thread::yield();
+    local.reset();
+    finish=true;active.join();
+    passed=passed && !bad.load() && transient_fn()==7 &&
+                    reinterpret_cast<native_function>(raw_original)()==7 &&
+                    reinterpret_cast<native_function>(static_cast<std::uint8_t*>(transient)-5)()==7;
+    if(hotpatch::reserves_address(transient)) (void)transient_owner.release();
+ 
+    native_owner cooperative(shadowhook::memory::allocate_rwx(4096),&shadowhook::memory::free_rwx);
+    if(!cooperative) return 7;
+    const std::uint8_t old_code[]={0xB8,7,0,0,0,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0xC3};
+    std::memcpy(cooperative.get(),old_code,sizeof(old_code));
+    DWORD previous{};
+    passed=passed && VirtualProtect(cooperative.get(),4096,PAGE_EXECUTE_READ,&previous) &&
+                    FlushInstructionCache(GetCurrentProcess(),cooperative.get(),sizeof(old_code));
+    passed=passed && sh_hook(shadowhook::hook_type::inline_hook,cooperative.get(),detour,nullptr)==0;
+    {
+        auto executing=shadowhook::enter_inline_execution();
+        passed=passed && executing && reinterpret_cast<native_function>(cooperative.get())()==8;
+    }
+    passed=passed && sh_unhook(cooperative.get())==0;
+    const auto cleanup=sh_shutdown_checked();
+    if(cleanup!=0) { (void)cooperative.release();passed=false; }
+    shadowhook::log::raw(passed ? shadowhook::log::level::info:shadowhook::log::level::error,
+                        passed ? "+":"-","Native hotpatch demo | %s",passed ? "PASS":"FAIL");
+    return passed ? 0:7;
+}
+
+
 } // namespace
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     if (argc == 2 && std::strcmp(argv[1], "--inline-demo") == 0) return run_inline_demo();
+    if (argc == 2 && std::strcmp(argv[1], "--hotpatch-demo") == 0) return run_hotpatch_demo();
     const bool self_test = argc == 2 && std::strcmp(argv[1], "--self-test") == 0;
     if (argc > 1 && !self_test) {
-        SH_LOG_WARN("Usage: api_monitor [--self-test | --inline-demo]");
+        SH_LOG_WARN("Usage: api_monitor [--self-test | --inline-demo | --hotpatch-demo]");
         return 1;
     }
     char executable[32768]{};
